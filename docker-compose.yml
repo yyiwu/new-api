@@ -16,7 +16,8 @@ version: '3.4' # For compatibility with older Docker versions
 
 services:
   new-api:
-    image: calciumion/new-api:latest
+    image: Erii/new-api:v1.0.0-rc.31
+    pull_policy: never
     container_name: new-api
     restart: always
     command: --log-dir /app/logs

@@ -67,8 +67,51 @@ func baseAutoTokenRequest(name string) map[string]any {
 func newTokenAutoGroupsAuthenticatedContext(t *testing.T, method string, target string, body any, userID int) (*gin.Context, *httptest.ResponseRecorder) {
 	t.Helper()
 	ctx, recorder := newAuthenticatedContext(t, method, target, body, userID)
+	ctx.Set("role", common.RoleAdminUser)
 	common.SetContextKey(ctx, constant.ContextKeyUserGroup, "default")
 	return ctx, recorder
+}
+
+func TestCommonUserTokenAlwaysFollowsUserGroup(t *testing.T) {
+	configureTokenAutoGroupsTest(t, "5", `["default","vip"]`)
+	user := setupTokenAutoGroupsControllerTest(t)
+
+	t.Run("create ignores submitted group", func(t *testing.T) {
+		request := baseAutoTokenRequest("common-create")
+		request["auto_groups"] = []string{"vip"}
+		ctx, recorder := newTokenAutoGroupsAuthenticatedContext(t, http.MethodPost, "/api/token/", request, user.Id)
+		ctx.Set("role", common.RoleCommonUser)
+
+		AddToken(ctx)
+
+		response := decodeAPIResponse(t, recorder)
+		require.True(t, response.Success, response.Message)
+		var token model.Token
+		require.NoError(t, model.DB.Where("name = ?", "common-create").First(&token).Error)
+		assert.Empty(t, token.Group)
+		assert.Empty(t, token.AutoGroups)
+		assert.False(t, token.CrossGroupRetry)
+	})
+
+	t.Run("update cannot add a token group", func(t *testing.T) {
+		token := seedToken(t, model.DB, user.Id, "common-update", "common-update-key")
+		request := baseAutoTokenRequest("common-updated")
+		request["id"] = token.Id
+		request["status"] = common.TokenStatusEnabled
+		request["auto_groups"] = []string{"vip"}
+		ctx, recorder := newTokenAutoGroupsAuthenticatedContext(t, http.MethodPut, "/api/token/", request, user.Id)
+		ctx.Set("role", common.RoleCommonUser)
+
+		UpdateToken(ctx)
+
+		response := decodeAPIResponse(t, recorder)
+		require.True(t, response.Success, response.Message)
+		var updated model.Token
+		require.NoError(t, model.DB.First(&updated, token.Id).Error)
+		assert.Empty(t, updated.Group)
+		assert.Empty(t, updated.AutoGroups)
+		assert.False(t, updated.CrossGroupRetry)
+	})
 }
 
 func TestAddTokenEmptyAutoGroupsInheritGlobalAuto(t *testing.T) {

@@ -87,11 +87,15 @@ func TestTaskPluginLogVisibilityIsRoleSeparated(t *testing.T) {
 
 func TestLegacyLogOtherVisibilityIsRoleSeparated(t *testing.T) {
 	other := common.MapToJsonStr(map[string]interface{}{
-		"request_path":  "/v1/chat/completions",
-		"channel_id":    202,
-		"channel_name":  "legacy-secret-channel",
-		"channel_type":  1,
-		"reject_reason": "legacy-policy-rejection",
+		"request_path":                 "/v1/chat/completions",
+		"channel_id":                   202,
+		"channel_name":                 "legacy-secret-channel",
+		"channel_type":                 1,
+		"reject_reason":                "legacy-policy-rejection",
+		"is_model_mapped":              true,
+		"upstream_model_name":          "routed-secret-model",
+		"is_system_prompt_overwritten": true,
+		"po":                           []string{"set reasoning.effort = high"},
 		"admin_info": map[string]interface{}{
 			"existing_admin_field": "preserved",
 		},
@@ -124,6 +128,10 @@ func TestLegacyLogOtherVisibilityIsRoleSeparated(t *testing.T) {
 			"channel_name",
 			"channel_type",
 			"reject_reason",
+			"is_model_mapped",
+			"upstream_model_name",
+			"is_system_prompt_overwritten",
+			"po",
 			"admin_info",
 			"root_info",
 			"audit_info",

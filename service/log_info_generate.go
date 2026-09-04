@@ -73,6 +73,13 @@ func AppendRelayLogAdminInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo,
 	}
 	other.SetAdmin("use_channel", ctx.GetStringSlice("use_channel"))
 	if relayInfo != nil {
+		if relayInfo.IsModelMapped {
+			other.SetAdmin("is_model_mapped", true)
+			other.SetAdmin("upstream_model_name", relayInfo.UpstreamModelName)
+		}
+		if len(relayInfo.ParamOverrideAudit) > 0 {
+			other.SetAdmin("po", relayInfo.ParamOverrideAudit)
+		}
 		if billingModel := relayInfo.GetBillingModelName(); billingModel != "" && billingModel != relayInfo.OriginModelName {
 			other.SetAdmin("billing_model", billingModel)
 		}
@@ -90,6 +97,9 @@ func AppendRelayLogAdminInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo,
 	if common.GetContextKeyBool(ctx, constant.ContextKeyLocalCountTokens) {
 		other.SetAdmin("local_count_tokens", true)
 	}
+	if common.GetContextKeyBool(ctx, constant.ContextKeySystemPromptOverride) {
+		other.SetAdmin("is_system_prompt_overwritten", true)
+	}
 
 	AppendChannelAffinityAdminInfo(ctx, other)
 }
@@ -105,17 +115,8 @@ func GenerateTextOtherInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, m
 	other.SetPublic("model_price", modelPrice)
 	other.SetPublic("user_group_ratio", userGroupRatio)
 	other.SetPublic("frt", float64(relayInfo.FirstResponseTime.UnixMilli()-relayInfo.StartTime.UnixMilli()))
-	if relayInfo.ReasoningEffort != "" {
-		other.SetPublic("reasoning_effort", relayInfo.ReasoningEffort)
-	}
-	if relayInfo.IsModelMapped {
-		other.SetPublic("is_model_mapped", true)
-		other.SetPublic("upstream_model_name", relayInfo.UpstreamModelName)
-	}
-
-	isSystemPromptOverwritten := common.GetContextKeyBool(ctx, constant.ContextKeySystemPromptOverride)
-	if isSystemPromptOverwritten {
-		other.SetPublic("is_system_prompt_overwritten", true)
+	if relayInfo.RequestedReasoningEffort != "" {
+		other.SetPublic("reasoning_effort", relayInfo.RequestedReasoningEffort)
 	}
 
 	AppendRelayLogAdminInfo(ctx, relayInfo, other)
@@ -123,16 +124,8 @@ func GenerateTextOtherInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, m
 	appendRequestConversionChain(relayInfo, other)
 	appendFinalRequestFormat(relayInfo, other)
 	appendBillingInfo(relayInfo, other)
-	appendParamOverrideInfo(relayInfo, other)
 	appendStreamStatus(relayInfo, other)
 	return other
-}
-
-func appendParamOverrideInfo(relayInfo *relaycommon.RelayInfo, other *model.LogOther) {
-	if relayInfo == nil || other == nil || len(relayInfo.ParamOverrideAudit) == 0 {
-		return
-	}
-	other.SetPublic("po", relayInfo.ParamOverrideAudit)
 }
 
 func appendStreamStatus(relayInfo *relaycommon.RelayInfo, other *model.LogOther) {

@@ -24,6 +24,8 @@ const { I18nextProvider, initReactI18next } = await import('react-i18next')
 const { QueryClient, QueryClientProvider } =
   await import('@tanstack/react-query')
 const { api } = await import('@/lib/api')
+const { ROLE } = await import('@/lib/roles')
+const { useAuthStore } = await import('@/stores/auth-store')
 const { ApiKeysProvider } = await import('../api-keys-provider')
 const { ApiKeysMutateDrawer } = await import('../api-keys-mutate-drawer')
 
@@ -84,7 +86,12 @@ function installApiFixtures(createdPayloads: Array<Record<string, unknown>>) {
   }
 }
 
-async function renderCreateDrawer(): Promise<void> {
+async function renderCreateDrawer(role = ROLE.ADMIN): Promise<void> {
+  useAuthStore.getState().auth.setUser({
+    id: 1,
+    username: 'test-user',
+    role,
+  })
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   })
@@ -196,6 +203,7 @@ function selectComboboxOption(
 afterEach(() => {
   apiClient.get = originalGet
   apiClient.post = originalPost
+  useAuthStore.getState().auth.reset('idle')
   localStorage.clear()
   if (renderedDrawer) {
     renderedDrawer.queryClient.clear()
@@ -204,6 +212,22 @@ afterEach(() => {
 })
 
 describe('API keys mutate drawer Auto group integration', () => {
+  test('hides group choices and creates an inherited-group key for common users', async () => {
+    const createdPayloads: Array<Record<string, unknown>> = []
+    installApiFixtures(createdPayloads)
+    await renderCreateDrawer(ROLE.USER)
+
+    expect(getControlByLabel('Group')).not.toBeVisible()
+
+    changeInput(getControlByLabel('Name'), 'common')
+    fireEvent.click(findButton('Save changes', true))
+    await waitFor(() => expect(createdPayloads).toHaveLength(1))
+
+    expect(createdPayloads[0]?.group).toBe('')
+    expect(createdPayloads[0]?.auto_groups).toEqual([])
+    expect(createdPayloads[0]?.cross_group_retry).toBe(false)
+  })
+
   test('inherits the root Auto order and sends an empty override for every batch-created key', async () => {
     const createdPayloads: Array<Record<string, unknown>> = []
     installApiFixtures(createdPayloads)
