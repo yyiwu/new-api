@@ -116,7 +116,10 @@ type RelayInfo struct {
 	RealtimeTools      []dto.RealTimeTool
 	IsFirstRequest     bool
 	AudioUsage         bool
-	ReasoningEffort    string
+	// RequestedReasoningEffort is captured before channel overrides and is the
+	// value written to audit logs. ReasoningEffort remains mutable per attempt.
+	RequestedReasoningEffort string
+	ReasoningEffort          string
 	// ReasoningConversion is the suffix-derived reasoning intent attached
 	// after model mapping. Converters read it via ReasoningState().
 	ReasoningConversion *dto.ReasoningConversionState
@@ -344,7 +347,7 @@ func (info *RelayInfo) InitChannelMeta(c *gin.Context) {
 		info.ReasoningEffort = ""
 		info.ReasoningConversion = nil
 	} else {
-		info.ReasoningEffort = reasoningEffortFromRequest(info.Request)
+		info.ReasoningEffort = info.RequestedReasoningEffort
 		info.ReasoningConversion = nil
 	}
 
@@ -615,8 +618,9 @@ func genBaseRelayInfo(c *gin.Context, request dto.Request) *RelayInfo {
 	reasoningEffort := reasoningEffortFromRequest(request)
 	originModelName := common.GetContextKeyString(c, constant.ContextKeyOriginalModel)
 	info := &RelayInfo{
-		Request:         request,
-		ReasoningEffort: reasoningEffort,
+		Request:                  request,
+		RequestedReasoningEffort: reasoningEffort,
+		ReasoningEffort:          reasoningEffort,
 
 		RequestId:  reqId,
 		UserId:     common.GetContextKeyInt(c, constant.ContextKeyUserId),

@@ -333,7 +333,12 @@ func AddToken(c *gin.Context) {
 		common.ApiErrorT(c, "Maximum number of tokens reached ({{max}})", map[string]any{"max": maxTokens})
 		return
 	}
-	if token.Group == "auto" {
+	if c.GetInt("role") < common.RoleAdminUser {
+		// TokenAuth treats an empty token group as the owner's current group.
+		token.Group = ""
+		token.CrossGroupRetry = false
+		_ = token.SetAutoGroups(nil)
+	} else if token.Group == "auto" {
 		if !setTokenAutoGroups(c, &token, request.AutoGroups.Groups) {
 			return
 		}
@@ -459,14 +464,21 @@ func UpdateToken(c *gin.Context) {
 		if request.AllowUserQuotaQuery != nil {
 			cleanToken.AllowUserQuotaQuery = *request.AllowUserQuotaQuery
 		}
-		cleanToken.Group = token.Group
-		cleanToken.CrossGroupRetry = token.CrossGroupRetry
-		if token.Group != "auto" {
+		if c.GetInt("role") < common.RoleAdminUser {
+			// Keep non-admin keys in the dynamic owner-group mode on full edits.
+			cleanToken.Group = ""
 			cleanToken.CrossGroupRetry = false
 			_ = cleanToken.SetAutoGroups(nil)
-		} else if request.AutoGroups.Set {
-			if !setTokenAutoGroups(c, cleanToken, request.AutoGroups.Groups) {
-				return
+		} else {
+			cleanToken.Group = token.Group
+			cleanToken.CrossGroupRetry = token.CrossGroupRetry
+			if token.Group != "auto" {
+				cleanToken.CrossGroupRetry = false
+				_ = cleanToken.SetAutoGroups(nil)
+			} else if request.AutoGroups.Set {
+				if !setTokenAutoGroups(c, cleanToken, request.AutoGroups.Groups) {
+					return
+				}
 			}
 		}
 	}

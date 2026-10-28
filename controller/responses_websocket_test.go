@@ -528,6 +528,7 @@ func assertResponsesWSAccounting(t *testing.T, fixture *responsesWSBillingTest, 
 }
 
 func TestResponsesWebSocketReusesConnectionAndSettlesEachRequest(t *testing.T) {
+	require.NoError(t, i18n.Init())
 	type upstreamRequest struct {
 		Authorization      string
 		Type               string `json:"type"`
@@ -554,7 +555,11 @@ func TestResponsesWebSocketReusesConnectionAndSettlesEachRequest(t *testing.T) {
 					return
 				}
 			}
-			terminal := fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_%d","status":"completed","model":"ws-billing","output":[],"usage":{"input_tokens":1000,"output_tokens":10,"total_tokens":1010}}}`, index)
+			created := fmt.Sprintf(`{"type":"response.created","response":{"id":"resp_%d","model":"gpt-4o"}}`, index)
+			if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(created))) {
+				return
+			}
+			terminal := fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_%d","status":"completed","model":"gpt-4o","output":[],"usage":{"input_tokens":1000,"output_tokens":10,"total_tokens":1010}}}`, index)
 			if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(terminal))) {
 				return
 			}
@@ -567,18 +572,23 @@ func TestResponsesWebSocketReusesConnectionAndSettlesEachRequest(t *testing.T) {
 		`{"type":"response.create","model":"ws-billing","input":"second","previous_response_id":"resp_1","service_tier":"priority"}`,
 	} {
 		require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(payload)))
+		created := readResponsesWSTestEvent(t, client)
+		require.Equal(t, "response.created", created["type"])
+		assert.Equal(t, "ws-billing", created["response"].(map[string]any)["model"])
 		require.NoError(t, client.SetReadDeadline(time.Now().Add(3*time.Second)))
 		_, data, err := client.ReadMessage()
 		require.NoError(t, err)
 		var terminal struct {
 			Type     string `json:"type"`
 			Response struct {
-				ID string `json:"id"`
+				ID    string `json:"id"`
+				Model string `json:"model"`
 			} `json:"response"`
 		}
 		require.NoError(t, common.Unmarshal(data, &terminal))
 		require.Equal(t, "response.completed", terminal.Type, "unexpected response: %s", data)
 		assert.Equal(t, fmt.Sprintf("resp_%d", index+1), terminal.Response.ID)
+		assert.Equal(t, "ws-billing", terminal.Response.Model)
 		observed := <-received
 		assert.Equal(t, "Bearer upstream-first", observed.Authorization)
 		assert.Equal(t, "gpt-4o", observed.Model)
@@ -613,6 +623,15 @@ func TestResponsesWebSocketReusesConnectionAndSettlesEachRequest(t *testing.T) {
 		assert.Equal(t, fmt.Sprintf("responses-ws-billing-ws-%d", index), logs[index].RequestId)
 		assert.Equal(t, 1000, logs[index].PromptTokens)
 		assert.Equal(t, 10, logs[index].CompletionTokens)
+		var other struct {
+			AdminInfo struct {
+				ResponseModel struct {
+					ReturnedModel string `json:"returned_model"`
+				} `json:"response_model"`
+			} `json:"admin_info"`
+		}
+		require.NoError(t, common.UnmarshalJsonStr(logs[index].Other, &other))
+		assert.Equal(t, "gpt-4o", other.AdminInfo.ResponseModel.ReturnedModel)
 	}
 	// Routing decisions are persisted per request: the first create selects a
 	// channel, later creates on the same connection reuse it as a pin.
@@ -992,6 +1011,49 @@ func TestResponsesStreamOutcomesPreserveAccounting(t *testing.T) {
 				assert.Equal(t, int64(1), successes)
 			})
 		}
+	}
+}
+
+func TestResponsesHTTPPreservesRequestedModel(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
+			fixture := newResponsesWSBillingTest(t, `tier("request", fixed(0.002))`, func(*websocket.Conn, *http.Request) {})
+			fixture.httpUpstream = func(w http.ResponseWriter, r *http.Request) {
+				var request struct {
+					Model string `json:"model"`
+				}
+				assert.NoError(t, common.DecodeJson(r.Body, &request))
+				assert.Equal(t, "gpt-4o", request.Model)
+				body := `{"id":"completed","model":"gpt-4o","status":"completed","output":[],"usage":{"input_tokens":1000,"output_tokens":10,"total_tokens":1010}}`
+				if stream {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = fmt.Fprintf(w, "data: {\"type\":\"response.completed\",\"response\":%s}\n\n", body)
+				} else {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, body)
+				}
+			}
+			request, err := http.NewRequest(http.MethodPost, fixture.gatewayURL+"/v1/responses", strings.NewReader(fmt.Sprintf(`{"model":"ws-billing","input":"hello","stream":%t}`, stream)))
+			require.NoError(t, err)
+			request.Header.Set("Authorization", "Bearer sk-"+fixture.token.Key)
+			request.Header.Set("Content-Type", "application/json")
+			response, err := (&http.Client{Timeout: 3 * time.Second}).Do(request)
+			require.NoError(t, err)
+			defer response.Body.Close()
+			body, err := io.ReadAll(response.Body)
+			require.NoError(t, err)
+			assert.Equal(t, http.StatusOK, response.StatusCode)
+			assert.Contains(t, string(body), `"model":"ws-billing"`)
+			assert.NotContains(t, string(body), `"gpt-4o"`)
+			select {
+			case <-fixture.httpDone:
+			case <-time.After(3 * time.Second):
+				t.Fatal("HTTP request did not finish")
+			}
+			assertResponsesWSAccounting(t, fixture, []int{1000})
+			waitPerfCounters(t, 1) // Drain async metrics before the fixture changes global Redis settings.
+		})
 	}
 }
 

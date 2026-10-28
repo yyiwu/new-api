@@ -1,6 +1,40 @@
 package common
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
+)
+
+// RestoreResponseModel changes only protocol model fields at the client boundary.
+// Keep the upstream body intact for usage accounting and model diagnostics.
+func RestoreResponseModel(data []byte, requested string) ([]byte, error) {
+	if requested == "" || !gjson.ValidBytes(data) {
+		return data, nil
+	}
+	paths := []string{"model", "modelVersion"}
+	switch event := gjson.GetBytes(data, "type").String(); {
+	case strings.HasPrefix(event, "response."):
+		paths = append(paths, "response.model")
+	case event == "message_start":
+		paths = append(paths, "message.model")
+	case event == "session.created" || event == "session.updated":
+		paths = append(paths, "session.model")
+	}
+	for _, path := range paths {
+		value := gjson.GetBytes(data, path)
+		if value.Type != gjson.String || value.String() == requested {
+			continue
+		}
+		var err error
+		data, err = sjson.SetBytes(data, path, requested)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return data, nil
+}
 
 // ResponseModel records upstream declarations before response conversion. It is
 // diagnostic only: it must never change routing, pricing, or downstream output.

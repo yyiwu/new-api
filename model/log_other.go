@@ -22,6 +22,11 @@ var legacySensitiveLogOtherKeys = []string{
 	"channel_id",
 	"channel_name",
 	"channel_type",
+	"is_model_mapped",
+	"upstream_model_name",
+	"response_model",
+	"is_system_prompt_overwritten",
+	"po",
 	"reject_reason",
 }
 
@@ -58,7 +63,7 @@ func isReservedLogOtherKey(key string) bool {
 
 // SetPublic records metadata that log owners may receive from self/token log APIs.
 // It rejects role-scoped and legacy-sensitive keys so new writers cannot recreate
-// the historical channel/reject-reason leak.
+// historical privileged-field leaks.
 func (o *LogOther) SetPublic(key string, value any) bool {
 	if o == nil || key == "" || isReservedLogOtherKey(key) {
 		return false

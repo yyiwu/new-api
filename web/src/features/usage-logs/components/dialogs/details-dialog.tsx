@@ -666,6 +666,21 @@ export function DetailsDialog(props: DetailsDialogProps) {
   const reasoningEffortVariant = getReasoningEffortVariant(
     other?.reasoning_effort
   )
+  const actualModel = props.isAdmin
+    ? adminInfo?.upstream_model_name || other?.upstream_model_name
+    : undefined
+  const responseModel = props.isAdmin
+    ? adminInfo?.response_model || other?.response_model
+    : undefined
+  const isModelMapped = !!(
+    actualModel &&
+    (adminInfo?.is_model_mapped || other?.is_model_mapped)
+  )
+  const systemPromptOverwritten =
+    props.isAdmin &&
+    (adminInfo?.is_system_prompt_overwritten ||
+      other?.is_system_prompt_overwritten)
+  const paramOverrides = props.isAdmin ? adminInfo?.po || other?.po : undefined
 
   return (
     <Dialog
@@ -1168,7 +1183,7 @@ export function DetailsDialog(props: DetailsDialogProps) {
         )}
 
         {/* System prompt override */}
-        {other?.is_system_prompt_overwritten && (
+        {systemPromptOverwritten && (
           <DetailRow
             label={t('System Prompt')}
             value={
@@ -1182,28 +1197,22 @@ export function DetailsDialog(props: DetailsDialogProps) {
           />
         )}
 
-        {other?.response_model && (
+        {responseModel && (
           <DetailSection label={t('Response Model')}>
-            <ResponseModelDetails observation={other.response_model} />
+            <ResponseModelDetails observation={responseModel} />
           </DetailSection>
         )}
         {/* Model mapping for logs without response observations */}
-        {!other?.response_model &&
-          other?.is_model_mapped &&
-          other?.upstream_model_name && (
-            <DetailSection label={t('Model Mapping')}>
-              <DetailRow
-                label={t('Request Model')}
-                value={props.log.model_name}
-                mono
-              />
-              <DetailRow
-                label={t('Actual Model')}
-                value={other.upstream_model_name}
-                mono
-              />
-            </DetailSection>
-          )}
+        {!responseModel && isModelMapped && actualModel && (
+          <DetailSection label={t('Model Mapping')}>
+            <DetailRow
+              label={t('Request Model')}
+              value={props.log.model_name}
+              mono
+            />
+            <DetailRow label={t('Actual Model')} value={actualModel} mono />
+          </DetailSection>
+        )}
 
         {/* Token breakdown (for consume/error types with token data) */}
         {isDisplayableType(props.log.type) && other && (
@@ -1354,13 +1363,13 @@ export function DetailsDialog(props: DetailsDialogProps) {
         )}
 
         {/* Param override */}
-        {other?.po && Array.isArray(other.po) && other.po.length > 0 && (
+        {Array.isArray(paramOverrides) && paramOverrides.length > 0 && (
           <DetailSection
             icon={<Settings2 className='size-3.5' aria-hidden='true' />}
             iconTone='chart-3'
-            label={`${t('Param Override')} (${other.po.length})`}
+            label={`${t('Param Override')} (${paramOverrides.length})`}
           >
-            {other.po.filter(Boolean).map((line) => {
+            {paramOverrides.filter(Boolean).map((line) => {
               const parsed = parseAuditLine(line)
               if (!parsed) return null
               return (

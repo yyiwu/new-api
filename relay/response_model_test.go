@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -15,10 +16,12 @@ import (
 	"github.com/QuantumNous/new-api/relay/channel/openai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -63,19 +66,22 @@ func TestResponseModelComparisonAndLog(t *testing.T) {
 			}
 			other := service.GenerateTextOtherInfo(c, info, 1, 1, 1, 0, 0, 0, 1)
 			var stored struct {
-				ResponseModel *relaycommon.ResponseModel `json:"response_model"`
+				AdminInfo struct {
+					ResponseModel *relaycommon.ResponseModel `json:"response_model"`
+				} `json:"admin_info"`
 			}
 			require.NoError(t, common.UnmarshalJsonStr(other.JSONString(), &stored))
+			assert.NotContains(t, other.Snapshot(), "response_model")
 			if tc.returned == "" {
-				assert.Nil(t, stored.ResponseModel)
+				assert.Nil(t, stored.AdminInfo.ResponseModel)
 				return
 			}
-			require.NotNil(t, stored.ResponseModel)
+			require.NotNil(t, stored.AdminInfo.ResponseModel)
 			assert.Equal(t, &relaycommon.ResponseModel{
 				RequestedModel: "requested", UpstreamModel: "mapped", ReturnedModel: tc.returned,
-			}, stored.ResponseModel)
+			}, stored.AdminInfo.ResponseModel)
 			assert.NotContains(t, other.JSONString(), "mismatch")
-			assert.Equal(t, tc.mismatch, stored.ResponseModel.Mismatch())
+			assert.Equal(t, tc.mismatch, stored.AdminInfo.ResponseModel.Mismatch())
 			assert.Equal(t, "mapped", info.UpstreamModelName)
 		})
 	}
@@ -107,10 +113,12 @@ func TestResponseModelLogOmitsUnchangedModel(t *testing.T) {
 			other := service.GenerateTextOtherInfo(c, info, 1, 1, 1, 0, 0, 0, 1)
 			require.NotNil(t, info.ResponseModel)
 			assert.Equal(t, float64(1), other.Snapshot()["model_ratio"])
+			adminInfo := other.Snapshot()["admin_info"].(map[string]any)
+			assert.NotContains(t, other.Snapshot(), "response_model")
 			if tc.record {
-				assert.Equal(t, *info.ResponseModel, other.Snapshot()["response_model"])
+				assert.Equal(t, *info.ResponseModel, adminInfo["response_model"])
 			} else {
-				assert.NotContains(t, other.Snapshot(), "response_model")
+				assert.NotContains(t, adminInfo, "response_model")
 			}
 		})
 	}
@@ -193,6 +201,10 @@ func TestResponseModelHandlersCaptureBeforeConversion(t *testing.T) {
 	}{
 		{"chat", chat, types.RelayFormatOpenAI, false, openai.OpenaiHandler},
 		{"chat stream", chatStream, types.RelayFormatOpenAI, true, openai.OaiStreamHandler},
+		{"chat to claude", chat, types.RelayFormatClaude, false, openai.OpenaiHandler},
+		{"chat to claude stream", chatStream, types.RelayFormatClaude, true, openai.OaiStreamHandler},
+		{"chat to gemini", chat, types.RelayFormatGemini, false, openai.OpenaiHandler},
+		{"chat to gemini stream", chatStream, types.RelayFormatGemini, true, openai.OaiStreamHandler},
 		{"responses", responses, types.RelayFormatOpenAIResponses, false, openai.OaiResponsesHandler},
 		{"responses stream", responsesStream, types.RelayFormatOpenAIResponses, true, openai.OaiResponsesStreamHandler},
 		{"responses to chat", responses, types.RelayFormatOpenAI, false, openai.OaiResponsesToChatHandler},
@@ -216,8 +228,10 @@ func TestResponseModelHandlersCaptureBeforeConversion(t *testing.T) {
 		{"gemini to responses stream", geminiStream, types.RelayFormatOpenAIResponses, true, gemini.GeminiResponsesStreamHandler},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
 			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			finish := helper.PreserveResponseModel(c, "requested")
 			info := &relaycommon.RelayInfo{
 				OriginModelName: "requested", RelayFormat: tc.format, RelayMode: relayconstant.RelayModeChatCompletions,
 				IsStream: tc.stream, DisablePing: true, StartTime: time.Now(),
@@ -225,14 +239,151 @@ func TestResponseModelHandlersCaptureBeforeConversion(t *testing.T) {
 				ThinkingContentInfo: relaycommon.ThinkingContentInfo{IsFirstThinkingContent: true},
 			}
 			usage, apiErr := tc.handler(c, info, &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(tc.body))})
+			finish()
 			require.Nil(t, apiErr)
+			assert.NotContains(t, recorder.Body.String(), `"returned"`)
+			assert.NotContains(t, recorder.Body.String(), `"mapped"`)
+			if !strings.HasPrefix(tc.name, "chat to gemini") {
+				assert.Contains(t, recorder.Body.String(), `"requested"`)
+			}
 			require.NotNil(t, usage)
 			assert.Equal(t, 5, usage.TotalTokens)
 			require.NotNil(t, info.ResponseModel)
 			assert.Equal(t, &relaycommon.ResponseModel{RequestedModel: "requested", UpstreamModel: "mapped", ReturnedModel: "returned"}, info.ResponseModel)
 			assert.True(t, info.ResponseModel.Mismatch())
 			other := service.GenerateTextOtherInfo(c, info, 1, 1, 1, 0, 0, 0, 1)
-			assert.Equal(t, *info.ResponseModel, other.Snapshot()["response_model"])
+			assert.Equal(t, *info.ResponseModel, other.Snapshot()["admin_info"].(map[string]any)["response_model"])
+		})
+	}
+}
+
+func TestRestoreClientResponseModel(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, want string
+	}{
+		{"chat", `{"model":"mapped","choices":[{"message":{"content":"mapped","model":"tool-data"}}],"large":9007199254740993}`, `{"model":"requested","choices":[{"message":{"content":"mapped","model":"tool-data"}}],"large":9007199254740993}`},
+		{"responses event", `{"type":"response.completed","response":{"model":"mapped","output":[{"model":"tool-data"}]}}`, `{"type":"response.completed","response":{"model":"requested","output":[{"model":"tool-data"}]}}`},
+		{"claude event", `{"type":"message_start","message":{"model":"mapped"}}`, `{"type":"message_start","message":{"model":"requested"}}`},
+		{"gemini", `{"modelVersion":"mapped","candidates":[]}`, `{"modelVersion":"requested","candidates":[]}`},
+		{"realtime", `{"type":"session.created","session":{"model":"mapped","tools":[{"model":"tool-data"}]}}`, `{"type":"session.created","session":{"model":"requested","tools":[{"model":"tool-data"}]}}`},
+		{"no model", `{"usage":{"total_tokens":5}}`, `{"usage":{"total_tokens":5}}`},
+		{"unrelated nested fields", `{"message":{"model":"tool-data"},"response":{"model":"tool-data"}}`, `{"message":{"model":"tool-data"},"response":{"model":"tool-data"}}`},
+		{"null model", `{"model":null}`, `{"model":null}`},
+		{"done", `[DONE]`, `[DONE]`},
+		{"malformed", `{"model":"mapped"`, `{"model":"mapped"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(tc.body)
+			got, err := relaycommon.RestoreResponseModel(body, "requested")
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, string(got))
+			assert.Equal(t, tc.body, string(body), "upstream audit/usage bytes must not be mutated")
+			unchanged, err := relaycommon.RestoreResponseModel(body, "")
+			require.NoError(t, err)
+			assert.Equal(t, tc.body, string(unchanged))
+		})
+	}
+}
+
+func TestResponseModelRealtimeEgress(t *testing.T) {
+	events := []string{
+		`{"type":"session.created","session":{"id":"session_1","model":"mapped"}}`,
+		`{"type":"response.created","response":{"id":"response_1","model":"mapped"}}`,
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if !assert.NoError(t, err) {
+			return
+		}
+		defer ws.Close()
+		for _, event := range events {
+			if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(event))) {
+				return
+			}
+		}
+		_, _, _ = ws.ReadMessage()
+	}))
+	defer upstream.Close()
+	finished := make(chan struct{})
+	engine := gin.New()
+	engine.GET("/v1/realtime", func(c *gin.Context) {
+		defer close(finished)
+		client, err := (&websocket.Upgrader{}).Upgrade(c.Writer, c.Request, nil)
+		if !assert.NoError(t, err) {
+			return
+		}
+		defer client.Close()
+		target, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(upstream.URL, "http"), nil)
+		if !assert.NoError(t, err) {
+			return
+		}
+		defer target.Close()
+		info := &relaycommon.RelayInfo{
+			OriginModelName: "requested", ClientWs: client, TargetWs: target,
+			ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "mapped"},
+		}
+		apiErr, _ := openai.OpenaiRealtimeHandler(c, info)
+		assert.Nil(t, apiErr)
+		assert.Equal(t, "mapped", info.UpstreamModelName)
+	})
+	gateway := httptest.NewServer(engine)
+	defer gateway.Close()
+	client, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(gateway.URL, "http")+"/v1/realtime", nil)
+	require.NoError(t, err)
+	defer client.Close()
+	require.NoError(t, client.SetReadDeadline(time.Now().Add(3*time.Second)))
+	for _, event := range events {
+		_, data, err := client.ReadMessage()
+		require.NoError(t, err)
+		assert.JSONEq(t, strings.ReplaceAll(event, `"mapped"`, `"requested"`), string(data))
+	}
+	require.NoError(t, client.Close())
+	select {
+	case <-finished:
+	case <-time.After(3 * time.Second):
+		t.Fatal("realtime relay did not finish")
+	}
+}
+
+func TestResponseModelWriter(t *testing.T) {
+	for _, tc := range []struct {
+		name, contentType string
+		chunks            []string
+		want              string
+	}{
+		{"json fragments", "application/json", []string{`{"model":"map`, `ped","content":"mapped"}`}, `{"model":"requested","content":"mapped"}`},
+		{"without content type", "", []string{`{"model":"mapped"}`}, `{"model":"requested"}`},
+		{"case insensitive content type", "Application/JSON; charset=utf-8", []string{`{"model":"mapped"}`}, `{"model":"requested"}`},
+		{"sse fragments", "text/event-stream", []string{"event: response.created\r\n", "data: {\"type\":\"response.created\",\"response\":{\"model\":\"map", "ped\"}}\r\n\r\n: PING\n\ndata: [DONE]\n\n"}, "event: response.created\r\ndata: {\"type\":\"response.created\",\"response\":{\"model\":\"requested\"}}\r\n\r\n: PING\n\ndata: [DONE]\n\n"},
+		{"multiline sse", "text/event-stream", []string{"id: 1\ndata: {\ndata: \"model\":\"mapped\"}\n\n"}, "id: 1\ndata: {\ndata: \"model\":\"requested\"}\n\n"},
+		{"binary", "audio/mpeg", []string{"\x00\xff", `{"model":"mapped"}`}, "\x00\xff" + `{"model":"mapped"}`},
+		{"plain text", "text/plain", []string{`{"model":"mapped"}`}, `{"model":"mapped"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Header("Content-Type", tc.contentType)
+			finish := helper.PreserveResponseModel(c, "requested")
+			if tc.contentType == "application/json" {
+				c.Header("Content-Length", strconv.Itoa(len(strings.Join(tc.chunks, ""))))
+			}
+			for i, chunk := range tc.chunks {
+				var n int
+				var err error
+				if i%2 == 0 {
+					n, err = c.Writer.Write([]byte(chunk))
+				} else {
+					n, err = c.Writer.WriteString(chunk)
+				}
+				require.NoError(t, err)
+				assert.Equal(t, len(chunk), n)
+			}
+			require.NoError(t, helper.FlushWriter(c))
+			finish()
+			assert.Equal(t, tc.want, recorder.Body.String())
+			if tc.contentType == "application/json" {
+				assert.Equal(t, strconv.Itoa(len(tc.want)), recorder.Result().Header.Get("Content-Length"))
+			}
 		})
 	}
 }

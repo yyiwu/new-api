@@ -24,7 +24,10 @@ import {
 } from '@tanstack/react-table'
 import { render, screen, within, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { expect, it, vi } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
+
+import { ROLE } from '@/lib/roles'
+import { useAuthStore } from '@/stores/auth-store'
 
 import { usageLogSchema, type UsageLog } from '../../data/schema'
 import { useCommonLogsColumns } from '../columns/common-logs-columns'
@@ -84,6 +87,11 @@ function Fixture(props: {
 }
 
 function renderLogs(props: Parameters<typeof Fixture>[0] = {}) {
+  useAuthStore.getState().auth.setUser({
+    id: 1,
+    username: 'test-user',
+    role: props.admin === false ? ROLE.USER : ROLE.ADMIN,
+  })
   return render(
     <QueryClientProvider
       client={
@@ -96,6 +104,43 @@ function renderLogs(props: Parameters<typeof Fixture>[0] = {}) {
     </QueryClientProvider>
   )
 }
+
+afterEach(() => useAuthStore.getState().auth.reset('idle'))
+
+it.each([false, true])(
+  'hides routing metadata from common users on mobile (scoped: %s)',
+  async (scoped) => {
+    const user = userEvent.setup()
+    const copy = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue()
+    const routing = {
+      is_model_mapped: true,
+      upstream_model_name: 'mapped-secret-model',
+      response_model: {
+        requested_model: longName,
+        upstream_model: 'mapped-secret-model',
+        returned_model: 'returned-secret-model',
+      },
+    }
+    renderLogs({
+      admin: false,
+      logs: [
+        {
+          ...log,
+          other: JSON.stringify(scoped ? { admin_info: routing } : routing),
+        },
+      ],
+    })
+
+    await user.click(screen.getByRole('button', { name: `Model: ${longName}` }))
+
+    expect(copy).toHaveBeenCalledWith(longName)
+    expect(
+      screen.queryByRole('dialog', { name: 'Model' })
+    ).not.toBeInTheDocument()
+    expect(screen.queryByText('mapped-secret-model')).not.toBeInTheDocument()
+    expect(screen.queryByText('returned-secret-model')).not.toBeInTheDocument()
+  }
+)
 
 it('shows model mismatch evidence when tapping the mobile model badge', async () => {
   const user = userEvent.setup()

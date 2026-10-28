@@ -187,7 +187,10 @@ func OpenaiRealtimeHandler(c *gin.Context, info *relaycommon.RelayInfo) (*types.
 					localUsage.OutputTokenDetails.AudioTokens += audioToken
 				}
 
-				err = helper.WssString(c, clientConn, string(message))
+				clientMessage, err := relaycommon.RestoreResponseModel(message, info.OriginModelName)
+				if err == nil {
+					err = helper.WssString(c, clientConn, string(clientMessage))
+				}
 				if err != nil {
 					errChan <- fmt.Errorf("error writing to client: %v", err)
 					return

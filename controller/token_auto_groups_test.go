@@ -67,8 +67,64 @@ func baseAutoTokenRequest(name string) map[string]any {
 func newTokenAutoGroupsAuthenticatedContext(t *testing.T, method string, target string, body any, userID int) (*gin.Context, *httptest.ResponseRecorder) {
 	t.Helper()
 	ctx, recorder := newAuthenticatedContext(t, method, target, body, userID)
+	ctx.Set("role", common.RoleAdminUser)
 	common.SetContextKey(ctx, constant.ContextKeyUserGroup, "default")
 	return ctx, recorder
+}
+
+func TestCommonUserTokenAlwaysFollowsUserGroup(t *testing.T) {
+	configureTokenAutoGroupsTest(t, "5", `["default","vip"]`)
+	db, dialect := openTaskDialectDatabase(t, &model.Token{}, &model.User{})
+	oldDB, oldLogDB := model.DB, model.LOG_DB
+	oldMain, oldLog := common.MainDatabaseType(), common.LogDatabaseType()
+	oldRedis := common.RedisEnabled
+	model.DB, model.LOG_DB = db, db
+	common.SetDatabaseTypes(dialect, dialect)
+	common.RedisEnabled = false
+	t.Cleanup(func() {
+		model.DB, model.LOG_DB = oldDB, oldLogDB
+		common.SetDatabaseTypes(oldMain, oldLog)
+		common.RedisEnabled = oldRedis
+	})
+	user := &model.User{Id: 101, Username: "common-token-user", Group: "default", Status: common.UserStatusEnabled}
+	require.NoError(t, db.Create(user).Error)
+
+	t.Run("create ignores submitted group", func(t *testing.T) {
+		request := baseAutoTokenRequest("common-create")
+		request["auto_groups"] = []string{"vip"}
+		ctx, recorder := newTokenAutoGroupsAuthenticatedContext(t, http.MethodPost, "/api/token/", request, user.Id)
+		ctx.Set("role", common.RoleCommonUser)
+
+		AddToken(ctx)
+
+		response := decodeAPIResponse(t, recorder)
+		require.True(t, response.Success, response.Message)
+		var token model.Token
+		require.NoError(t, model.DB.Where("name = ?", "common-create").First(&token).Error)
+		assert.Empty(t, token.Group)
+		assert.Empty(t, token.AutoGroups)
+		assert.False(t, token.CrossGroupRetry)
+	})
+
+	t.Run("update cannot add a token group", func(t *testing.T) {
+		token := seedToken(t, model.DB, user.Id, "common-update", "common-update-key")
+		request := baseAutoTokenRequest("common-updated")
+		request["id"] = token.Id
+		request["status"] = common.TokenStatusEnabled
+		request["auto_groups"] = []string{"vip"}
+		ctx, recorder := newTokenAutoGroupsAuthenticatedContext(t, http.MethodPut, "/api/token/", request, user.Id)
+		ctx.Set("role", common.RoleCommonUser)
+
+		UpdateToken(ctx)
+
+		response := decodeAPIResponse(t, recorder)
+		require.True(t, response.Success, response.Message)
+		var updated model.Token
+		require.NoError(t, model.DB.First(&updated, token.Id).Error)
+		assert.Empty(t, updated.Group)
+		assert.Empty(t, updated.AutoGroups)
+		assert.False(t, updated.CrossGroupRetry)
+	})
 }
 
 func TestAddTokenEmptyAutoGroupsInheritGlobalAuto(t *testing.T) {

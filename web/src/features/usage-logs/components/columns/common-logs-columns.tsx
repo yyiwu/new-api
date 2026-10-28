@@ -127,6 +127,13 @@ function buildDetailSegments(
   if (isAdmin && other?.admin_info?.quota_saturation) {
     adminSegments.push({ text: t('Quota clamped'), danger: true })
   }
+  if (
+    isAdmin &&
+    (other?.admin_info?.is_system_prompt_overwritten ||
+      other?.is_system_prompt_overwritten)
+  ) {
+    adminSegments.push({ text: t('System Prompt Override'), danger: true })
+  }
   return [...adminSegments, ...segments]
 }
 
@@ -336,13 +343,6 @@ function buildTypeDetailSegments(
         })
       }
     }
-  }
-
-  if (other.is_system_prompt_overwritten) {
-    segments.push({
-      text: t('System Prompt Override'),
-      danger: true,
-    })
   }
 
   return segments
@@ -684,7 +684,7 @@ export function useCommonLogsColumns(
           const log = row.original
           if (!isDisplayableLogType(log.type)) return null
 
-          const modelInfo = formatModelName(log)
+          const modelInfo = formatModelName(log, isAdmin)
 
           return (
             <div className='flex w-fit flex-col gap-0.5'>
