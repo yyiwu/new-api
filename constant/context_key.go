@@ -7,8 +7,9 @@ const (
 	ContextKeyPromptTokens    ContextKey = "prompt_tokens"
 	ContextKeyEstimatedTokens ContextKey = "estimated_tokens"
 
-	ContextKeyOriginalModel    ContextKey = "original_model"
-	ContextKeyRequestStartTime ContextKey = "request_start_time"
+	ContextKeyOriginalModel            ContextKey = "original_model"
+	ContextKeyRequestedReasoningEffort ContextKey = "requested_reasoning_effort"
+	ContextKeyRequestStartTime         ContextKey = "request_start_time"
 
 	/* token related keys */
 	ContextKeyTokenUnlimited         ContextKey = "token_unlimited_quota"

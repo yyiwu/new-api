@@ -67,13 +67,14 @@ func TestProcessChannelErrorUsesSnapshotWithoutLeakingChannelMetadata(t *testing
 		ChannelName: "snapshot-channel",
 		AutoBan:     false,
 	}
-	apiErr := types.NewOpenAIError(errors.New("upstream failed"), types.ErrorCodeBadResponseStatusCode, http.StatusBadGateway)
+	apiErr := types.NewOpenAIError(errors.New("routed-secret-model rejected reasoning effort high"), types.ErrorCodeBadResponseStatusCode, http.StatusBadGateway)
 
 	processChannelError(ctx, channelSnapshot, apiErr, nil)
 
 	var stored model.Log
 	require.NoError(t, database.First(&stored).Error)
 	assert.Equal(t, channelSnapshot.ChannelId, stored.ChannelId)
+	assert.Contains(t, stored.Content, "routed-secret-model")
 	storedOther, err := common.StrToMap(stored.Other)
 	require.NoError(t, err)
 	assert.Equal(t, float64(http.StatusBadGateway), storedOther["status_code"])
@@ -90,6 +91,7 @@ func TestProcessChannelErrorUsesSnapshotWithoutLeakingChannelMetadata(t *testing
 	require.Len(t, logs, 1)
 	assert.Equal(t, channelSnapshot.ChannelId, logs[0].ChannelId)
 	assert.Empty(t, logs[0].ChannelName)
+	assert.Equal(t, "Upstream request failed", logs[0].Content)
 	userOther, err := common.StrToMap(logs[0].Other)
 	require.NoError(t, err)
 	assert.NotContains(t, userOther, "admin_info")

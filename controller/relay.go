@@ -99,6 +99,14 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	defer func() {
 		requestplugin.Report(c, relayFormat, relayInfo, ingressRecord, newAPIError)
 	}()
+	if relayFormat != types.RelayFormatOpenAIRealtime {
+		defer helper.FinalizeRelayResponse(c, common.GetContextKeyString(c, constant.ContextKeyOriginalModel), relayFormat, func() *relaycommon.UsageReceipt {
+			if relayInfo == nil || newAPIError != nil {
+				return nil
+			}
+			return relayInfo.UsageReceipt
+		})()
+	}
 
 	defer func() {
 		if newAPIError != nil {
@@ -565,6 +573,7 @@ func RelayTask(c *gin.Context) {
 		respondTaskSubmissionError(c, taskErr)
 		return
 	}
+	defer helper.PreserveResponseModel(c, relayInfo.OriginModelName)()
 
 	var outcome *taskSubmissionOutcome
 	outcome, taskErr = executeTaskSubmission(c, relayInfo)

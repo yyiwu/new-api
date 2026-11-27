@@ -33,6 +33,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 	"gorm.io/gorm"
 )
 
@@ -528,6 +529,7 @@ func assertResponsesWSAccounting(t *testing.T, fixture *responsesWSBillingTest, 
 }
 
 func TestResponsesWebSocketReusesConnectionAndSettlesEachRequest(t *testing.T) {
+	require.NoError(t, i18n.Init())
 	type upstreamRequest struct {
 		Authorization      string
 		Type               string `json:"type"`
@@ -554,7 +556,11 @@ func TestResponsesWebSocketReusesConnectionAndSettlesEachRequest(t *testing.T) {
 					return
 				}
 			}
-			terminal := fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_%d","status":"completed","model":"ws-billing","output":[],"usage":{"input_tokens":1000,"output_tokens":10,"total_tokens":1010}}}`, index)
+			created := fmt.Sprintf(`{"type":"response.created","response":{"id":"resp_%d","model":"gpt-4o"}}`, index)
+			if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(created))) {
+				return
+			}
+			terminal := fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_%d","status":"completed","model":"gpt-4o","output":[],"usage":{"input_tokens":1000,"output_tokens":10,"total_tokens":1010}}}`, index)
 			if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(terminal))) {
 				return
 			}
@@ -567,18 +573,33 @@ func TestResponsesWebSocketReusesConnectionAndSettlesEachRequest(t *testing.T) {
 		`{"type":"response.create","model":"ws-billing","input":"second","previous_response_id":"resp_1","service_tier":"priority"}`,
 	} {
 		require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(payload)))
+		created := readResponsesWSTestEvent(t, client)
+		require.Equal(t, "response.created", created["type"])
+		assert.Equal(t, "ws-billing", created["response"].(map[string]any)["model"])
 		require.NoError(t, client.SetReadDeadline(time.Now().Add(3*time.Second)))
 		_, data, err := client.ReadMessage()
 		require.NoError(t, err)
 		var terminal struct {
 			Type     string `json:"type"`
 			Response struct {
-				ID string `json:"id"`
+				ID    string `json:"id"`
+				Model string `json:"model"`
+				Usage struct {
+					InputTokens int     `json:"input_tokens"`
+					Quota       int     `json:"quota"`
+					CostUSD     float64 `json:"cost_usd"`
+					LogID       string  `json:"log_id"`
+				} `json:"usage"`
 			} `json:"response"`
 		}
 		require.NoError(t, common.Unmarshal(data, &terminal))
 		require.Equal(t, "response.completed", terminal.Type, "unexpected response: %s", data)
 		assert.Equal(t, fmt.Sprintf("resp_%d", index+1), terminal.Response.ID)
+		assert.Equal(t, "ws-billing", terminal.Response.Model)
+		assert.Equal(t, 1000, terminal.Response.Usage.InputTokens)
+		assert.Equal(t, 1000*(index+1), terminal.Response.Usage.Quota)
+		assert.Equal(t, 0.002*float64(index+1), terminal.Response.Usage.CostUSD)
+		assert.Equal(t, fmt.Sprintf("responses-ws-billing-ws-%d", index), terminal.Response.Usage.LogID)
 		observed := <-received
 		assert.Equal(t, "Bearer upstream-first", observed.Authorization)
 		assert.Equal(t, "gpt-4o", observed.Model)
@@ -613,6 +634,15 @@ func TestResponsesWebSocketReusesConnectionAndSettlesEachRequest(t *testing.T) {
 		assert.Equal(t, fmt.Sprintf("responses-ws-billing-ws-%d", index), logs[index].RequestId)
 		assert.Equal(t, 1000, logs[index].PromptTokens)
 		assert.Equal(t, 10, logs[index].CompletionTokens)
+		var other struct {
+			RootInfo struct {
+				ResponseModel struct {
+					ReturnedModel string `json:"returned_model"`
+				} `json:"response_model"`
+			} `json:"root_info"`
+		}
+		require.NoError(t, common.UnmarshalJsonStr(logs[index].Other, &other))
+		assert.Equal(t, "gpt-4o", other.RootInfo.ResponseModel.ReturnedModel)
 	}
 	// Routing decisions are persisted per request: the first create selects a
 	// channel, later creates on the same connection reuse it as a pin.
@@ -707,7 +737,11 @@ func TestResponsesWebSocketDialsNativeResponsesChannelTypes(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, response.Body.Close())
 			assert.Equal(t, http.StatusOK, response.StatusCode)
-			assert.Contains(t, string(body), terminal)
+			_, data, found := strings.Cut(string(body), "data: ")
+			require.True(t, found, "%s", body)
+			frame, _, _ := strings.Cut(data, "\n")
+			want := strings.Replace(terminal, `"total_tokens":1010`, `"total_tokens":1010,"quota":1000,"cost_usd":0.002,"log_id":"responses-http-billing"`, 1)
+			assert.JSONEq(t, want, frame)
 			select {
 			case <-fixture.httpDone:
 			case <-time.After(3 * time.Second):
@@ -930,6 +964,24 @@ func TestResponsesStreamOutcomesPreserveAccounting(t *testing.T) {
 				setting.ModelRequestRateLimitDurationMinutes = 1
 				setting.ModelRequestRateLimitSuccessCount = 1
 				setting.ModelRequestRateLimitCount = 0
+				wantTerminal := terminal
+				if gjson.Get(terminal, "response").IsObject() {
+					var event map[string]any
+					require.NoError(t, common.UnmarshalJsonStr(terminal, &event))
+					response := event["response"].(map[string]any)
+					usage, _ := response["usage"].(map[string]any)
+					if usage == nil {
+						usage = make(map[string]any)
+						response["usage"] = usage
+					}
+					usage["quota"], usage["cost_usd"], usage["log_id"] = 1000, 0.002, "responses-ws-billing-ws-0"
+					if transport == "http-sse" {
+						usage["log_id"] = "responses-http-billing"
+					}
+					encoded, err := common.Marshal(event)
+					require.NoError(t, err)
+					wantTerminal = string(encoded)
+				}
 				if transport == "http-sse" {
 					request, err := http.NewRequest(http.MethodPost, fixture.gatewayURL+"/v1/responses", strings.NewReader(`{"model":"ws-billing","input":"hi","stream":true,"max_output_tokens":1}`))
 					require.NoError(t, err)
@@ -941,13 +993,22 @@ func TestResponsesStreamOutcomesPreserveAccounting(t *testing.T) {
 					require.NoError(t, err)
 					require.NoError(t, response.Body.Close())
 					assert.Equal(t, http.StatusOK, response.StatusCode)
-					assert.Contains(t, string(body), terminal)
+					var frame string
+					for line := range strings.SplitSeq(string(body), "\n") {
+						if data, ok := strings.CutPrefix(line, "data: "); ok && gjson.Get(data, "type").Str == gjson.Get(terminal, "type").Str {
+							frame = data
+						}
+					}
+					assert.JSONEq(t, wantTerminal, frame)
 				} else {
 					require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","stream_id":"planner","model":"ws-billing","input":"hi","max_output_tokens":1}`)))
-					for _, expected := range events {
+					for index, expected := range events {
+						if index == len(events)-1 {
+							expected = wantTerminal
+						}
 						actual, err := common.Marshal(readResponsesWSTestEvent(t, fixture.client))
 						require.NoError(t, err)
-						assert.JSONEq(t, expected, string(actual), "upstream frames must be delivered once and unchanged")
+						assert.JSONEq(t, expected, string(actual))
 					}
 				}
 				quotas := []int{1000}
@@ -992,6 +1053,83 @@ func TestResponsesStreamOutcomesPreserveAccounting(t *testing.T) {
 				assert.Equal(t, int64(1), successes)
 			})
 		}
+	}
+}
+
+func TestResponsesHTTPPreservesRequestedModelAndReturnsReceipt(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	for _, scenario := range []struct {
+		name   string
+		stream bool
+		log    bool
+		cost   float64
+	}{
+		{name: "json", log: true, cost: 0.002},
+		{name: "sse", stream: true, log: true, cost: 0.002},
+		{name: "no consume log", cost: 0.002},
+		{name: "zero charge", log: true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			fixture := newResponsesWSBillingTest(t, fmt.Sprintf(`tier("request", fixed(%g))`, scenario.cost), func(*websocket.Conn, *http.Request) {})
+			common.LogConsumeEnabled = scenario.log
+			wantQuota := common.QuotaRound(scenario.cost * common.QuotaPerUnit)
+			fixture.httpUpstream = func(w http.ResponseWriter, r *http.Request) {
+				var request struct {
+					Model string `json:"model"`
+				}
+				assert.NoError(t, common.DecodeJson(r.Body, &request))
+				assert.Equal(t, "gpt-4o", request.Model)
+				body := `{"id":"completed","model":"gpt-4o","status":"completed","output":[],"usage":{"input_tokens":1000,"output_tokens":10,"total_tokens":1010,"cost_usd":99,"quota":99,"log_id":"upstream-id"}}`
+				if scenario.stream {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = fmt.Fprintf(w, "data: {\"type\":\"response.completed\",\"response\":%s}\n\n", body)
+				} else {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, body)
+				}
+			}
+			request, err := http.NewRequest(http.MethodPost, fixture.gatewayURL+"/v1/responses", strings.NewReader(fmt.Sprintf(`{"model":"ws-billing","input":"hello","stream":%t}`, scenario.stream)))
+			require.NoError(t, err)
+			request.Header.Set("Authorization", "Bearer sk-"+fixture.token.Key)
+			request.Header.Set("Content-Type", "application/json")
+			response, err := (&http.Client{Timeout: 3 * time.Second}).Do(request)
+			require.NoError(t, err)
+			defer response.Body.Close()
+			body, err := io.ReadAll(response.Body)
+			require.NoError(t, err)
+			assert.Equal(t, http.StatusOK, response.StatusCode)
+			assert.Contains(t, string(body), `"model":"ws-billing"`)
+			assert.NotContains(t, string(body), `"gpt-4o"`)
+			usage := gjson.GetBytes(body, "usage")
+			if scenario.stream {
+				for _, line := range strings.Split(string(body), "\n") {
+					if frame, ok := strings.CutPrefix(line, "data:"); ok && gjson.Get(frame, "type").Str == "response.completed" {
+						usage = gjson.Get(frame, "response.usage")
+					}
+				}
+			}
+			require.True(t, usage.IsObject(), "%s", body)
+			assert.Equal(t, int64(1010), usage.Get("total_tokens").Int())
+			assert.Equal(t, gjson.Number, usage.Get("quota").Type)
+			assert.Equal(t, gjson.Number, usage.Get("cost_usd").Type)
+			assert.Equal(t, int64(wantQuota), usage.Get("quota").Int())
+			assert.Equal(t, scenario.cost, usage.Get("cost_usd").Float())
+			select {
+			case <-fixture.httpDone:
+			case <-time.After(3 * time.Second):
+				t.Fatal("HTTP request did not finish")
+			}
+			if scenario.log {
+				assert.Equal(t, "responses-http-billing", usage.Get("log_id").Str)
+				assertResponsesWSAccounting(t, fixture, []int{wantQuota})
+			} else {
+				assert.Equal(t, "null", usage.Get("log_id").Raw)
+				var count int64
+				require.NoError(t, model.LOG_DB.Model(&model.Log{}).Where("token_id = ? AND type = ?", fixture.token.Id, model.LogTypeConsume).Count(&count).Error)
+				assert.Zero(t, count)
+			}
+			waitPerfCounters(t, 1) // Drain async metrics before the fixture changes global Redis settings.
+		})
 	}
 }
 
@@ -1198,6 +1336,9 @@ func TestResponsesWebSocketCloseCodes(t *testing.T) {
 			for _, event := range tc.events {
 				actual, err := common.Marshal(readResponsesWSTestEvent(t, fixture.client))
 				require.NoError(t, err)
+				if event == completed {
+					event = strings.Replace(event, `"total_tokens":1010`, `"total_tokens":1010,"quota":1000,"cost_usd":0.002,"log_id":"responses-ws-billing-ws-0"`, 1)
+				}
 				assert.JSONEq(t, event, string(actual))
 			}
 			close(clientRead)

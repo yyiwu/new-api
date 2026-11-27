@@ -72,9 +72,23 @@ func AppendRelayLogAdminInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo,
 		return
 	}
 	other.SetAdmin("use_channel", ctx.GetStringSlice("use_channel"))
+	requestedEffort := common.GetContextKeyString(ctx, constant.ContextKeyRequestedReasoningEffort)
 	if relayInfo != nil {
+		if relayInfo.RequestedReasoningEffort != "" {
+			requestedEffort = relayInfo.RequestedReasoningEffort
+		}
+		if relayInfo.ReasoningEffort != relayInfo.RequestedReasoningEffort {
+			other.SetAdmin("effective_reasoning_effort", relayInfo.ReasoningEffort)
+		}
+		if relayInfo.ChannelMeta != nil && relayInfo.IsModelMapped {
+			other.SetRoot("is_model_mapped", true)
+			other.SetRoot("upstream_model_name", relayInfo.UpstreamModelName)
+		}
+		if len(relayInfo.ParamOverrideAudit) > 0 {
+			other.SetRoot("po", relayInfo.ParamOverrideAudit)
+		}
 		if billingModel := relayInfo.GetBillingModelName(); billingModel != "" && billingModel != relayInfo.OriginModelName {
-			other.SetAdmin("billing_model", billingModel)
+			other.SetRoot("billing_model", billingModel)
 		}
 		if diagnostics := relayInfo.ConversionDiagnostics(); len(diagnostics) > 0 {
 			other.SetAdmin("conversion_diagnostics", diagnostics)
@@ -86,12 +100,18 @@ func AppendRelayLogAdminInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo,
 			other.SetAdmin("request_plugins", relayInfo.RequestPluginSteps)
 		}
 	}
+	if requestedEffort != "" {
+		other.SetPublic(model.LogOtherRequestedReasoningEffortKey, requestedEffort)
+	}
 	if common.GetContextKeyBool(ctx, constant.ContextKeyChannelIsMultiKey) {
 		other.SetAdmin("is_multi_key", true)
 		other.SetAdmin("multi_key_index", common.GetContextKeyInt(ctx, constant.ContextKeyChannelMultiKeyIndex))
 	}
 	if common.GetContextKeyBool(ctx, constant.ContextKeyLocalCountTokens) {
 		other.SetAdmin("local_count_tokens", true)
+	}
+	if common.GetContextKeyBool(ctx, constant.ContextKeySystemPromptOverride) {
+		other.SetAdmin("is_system_prompt_overwritten", true)
 	}
 
 	AppendChannelAffinityAdminInfo(ctx, other)
@@ -112,26 +132,12 @@ func GenerateTextOtherInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, m
 	other.SetPublic("model_price", modelPrice)
 	other.SetPublic("user_group_ratio", userGroupRatio)
 	other.SetPublic("frt", float64(relayInfo.FirstResponseTime.UnixMilli()-relayInfo.StartTime.UnixMilli()))
-	if relayInfo.ReasoningEffort != "" {
-		other.SetPublic("reasoning_effort", relayInfo.ReasoningEffort)
-	}
-	if relayInfo.IsModelMapped {
-		other.SetPublic("is_model_mapped", true)
-		other.SetPublic("upstream_model_name", relayInfo.UpstreamModelName)
-	}
-
-	isSystemPromptOverwritten := common.GetContextKeyBool(ctx, constant.ContextKeySystemPromptOverride)
-	if isSystemPromptOverwritten {
-		other.SetPublic("is_system_prompt_overwritten", true)
-	}
-
 	AppendRelayLogAdminInfo(ctx, relayInfo, other)
 	AppendResponseModelLogInfo(relayInfo, other)
 	appendRequestPath(ctx, relayInfo, other)
 	appendRequestConversionChain(relayInfo, other)
 	appendFinalRequestFormat(relayInfo, other)
 	appendBillingInfo(relayInfo, other)
-	appendParamOverrideInfo(relayInfo, other)
 	appendRequestPluginRecord(relayInfo, other)
 	appendStreamStatus(relayInfo, other)
 	return other
@@ -147,24 +153,17 @@ func AppendResponseModelLogInfo(relayInfo *relaycommon.RelayInfo, other *model.L
 		(relayInfo.ChannelMeta == nil || !relayInfo.IsModelMapped) {
 		return
 	}
-	other.SetPublic("response_model", *observation)
+	other.SetRoot("response_model", *observation)
 }
 
-func appendParamOverrideInfo(relayInfo *relaycommon.RelayInfo, other *model.LogOther) {
-	if relayInfo == nil || other == nil || len(relayInfo.ParamOverrideAudit) == 0 {
-		return
-	}
-	other.SetPublic("po", relayInfo.ParamOverrideAudit)
-}
-
-// appendRequestPluginRecord shows users what the request plugins changed in
+// appendRequestPluginRecord shows root operators what the request plugins changed in
 // their request. A retry rewrites the attempt's entries in place, so the
 // log keeps a copy.
 func appendRequestPluginRecord(relayInfo *relaycommon.RelayInfo, other *model.LogOther) {
 	if relayInfo == nil || other == nil || len(relayInfo.RequestPluginRecord) == 0 {
 		return
 	}
-	other.SetPublic("request_plugins", relaycommon.CapRequestPluginRecord(slices.Clone(relayInfo.RequestPluginRecord)))
+	other.SetRoot("request_plugins", relaycommon.CapRequestPluginRecord(slices.Clone(relayInfo.RequestPluginRecord)))
 }
 
 func appendStreamStatus(relayInfo *relaycommon.RelayInfo, other *model.LogOther) {

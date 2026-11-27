@@ -543,7 +543,7 @@ export function egress(ctx, req) {
 	assert.Equal(t, 1_000_000, quota())
 	errorLog := lastLog(model.LogTypeError)
 	assert.Zero(t, errorLog.ChannelId)
-	assert.JSONEq(t, `[{"plugin":"rp-task","name":{"en":"Task"},"stage":"ingress","rejected":{"code":"blocked.task"}}]`, gjson.Get(errorLog.Other, "request_plugins").Raw)
+	assert.JSONEq(t, `[{"plugin":"rp-task","name":{"en":"Task"},"stage":"ingress","rejected":{"code":"blocked.task"}}]`, gjson.Get(errorLog.Other, "root_info.request_plugins").Raw)
 	assert.Equal(t, "reject", gjson.Get(errorLog.Other, "admin_info.request_plugins.0.action").Str)
 
 	// The redacted prompt is what the task plugin decodes, prices, sends and
@@ -557,7 +557,7 @@ export function egress(ctx, req) {
 	require.NoError(t, database.Where("task_id = ?", "task_rp_redacted").First(&task).Error)
 	assert.JSONEq(t, `{"prompt":"mail [email] a cat"}`, string(task.Data))
 	consumeLog := lastLog(model.LogTypeConsume)
-	assert.JSONEq(t, `[{"plugin":"rp-task","name":{"en":"Task"},"stage":"ingress","changes":[{"op":"replace","path":"prompt","value":"mail [email] a cat"}]}]`, gjson.Get(consumeLog.Other, "request_plugins").Raw)
+	assert.JSONEq(t, `[{"plugin":"rp-task","name":{"en":"Task"},"stage":"ingress","changes":[{"op":"replace","path":"prompt","value":"mail [email] a cat"}]}]`, gjson.Get(consumeLog.Other, "root_info.request_plugins").Raw)
 	assert.Equal(t, "redact", gjson.Get(consumeLog.Other, "admin_info.request_plugins.0.instance").Str)
 	assert.NotContains(t, consumeLog.Other, "a@b.c")
 	charged := 1_000_000 - quota()
@@ -579,7 +579,7 @@ export function egress(ctx, req) {
 	assert.Equal(t, before, quota())
 	errorLog = lastLog(model.LogTypeError)
 	assert.Equal(t, channel.Id, errorLog.ChannelId)
-	assert.JSONEq(t, `{"plugin":"rp-task","name":{"en":"Task"},"stage":"egress","rejected":{"code":"blocked.egress"}}`, gjson.Get(errorLog.Other, `request_plugins.#(stage=="egress")`).Raw)
+	assert.JSONEq(t, `{"plugin":"rp-task","name":{"en":"Task"},"stage":"egress","rejected":{"code":"blocked.egress"}}`, gjson.Get(errorLog.Other, `root_info.request_plugins.#(stage=="egress")`).Raw)
 }
 
 // On a native route the plugin decodes the body again after ingress changed

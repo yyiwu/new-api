@@ -192,6 +192,7 @@ func TestGenRelayInfoCapturesRequestReasoningEffort(t *testing.T) {
 			info, err := GenRelayInfo(ctx, tt.relayFormat, tt.request, nil)
 			require.NoError(t, err)
 			assert.Equal(t, tt.expected, info.ReasoningEffort)
+			assert.Equal(t, tt.expected, info.RequestedReasoningEffort)
 		})
 	}
 }
@@ -221,9 +222,11 @@ func TestInitChannelMetaRestoresRequestReasoningEffortForRetry(t *testing.T) {
 	info, err := GenRelayInfo(ctx, types.RelayFormatOpenAIResponses, request, nil)
 	require.NoError(t, err)
 
+	request.Reasoning.Effort = "mutated-after-parse"
 	info.SetReasoningEffort("high")
 	info.InitChannelMeta(ctx)
 	assert.Equal(t, "max", info.ReasoningEffort)
+	assert.Equal(t, "max", info.RequestedReasoningEffort)
 
 	info.SetReasoningEffort("low")
 	info.InitChannelMeta(ctx)

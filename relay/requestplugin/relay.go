@@ -79,6 +79,10 @@ func (p *Plan) ingress(c *gin.Context, format types.RelayFormat, model string) (
 		return false, nil, nil, nil
 	}
 	read := readStageBody(c)
+	if read.body != nil {
+		effort, _ := relaycommon.ReasoningEffortFromJSON(format, read.body)
+		common.SetContextKey(c, constant.ContextKeyRequestedReasoningEffort, effort)
+	}
 	user, token := requester(c)
 	outcome := p.Run(c.Request.Context(), Call{
 		Stage:  StageIngress,

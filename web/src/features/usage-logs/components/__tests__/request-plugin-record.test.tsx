@@ -155,13 +155,16 @@ function withClient(children: React.ReactNode) {
   )
 }
 
-function renderDetails(isAdmin: boolean) {
+function renderDetails(isAdmin: boolean, isRoot = false) {
+  const logOther = isRoot
+    ? { root_info: { request_plugins: other.request_plugins } }
+    : other
   render(
     withClient(
       <DetailsDialog
-        log={makeLog()}
+        log={makeLog(logOther)}
         isAdmin={isAdmin}
-        isRoot={false}
+        isRoot={isRoot}
         open
         onOpenChange={() => undefined}
       />
@@ -172,7 +175,7 @@ function renderDetails(isAdmin: boolean) {
 function ModelCell(props: { other?: LogOtherData }) {
   const table = useReactTable({
     data: [makeLog(props.other)],
-    columns: useCommonLogsColumns(false, false),
+    columns: useCommonLogsColumns(true, true),
     getCoreRowModel: getCoreRowModel(),
   })
   const cell = table
@@ -185,7 +188,7 @@ function ModelCell(props: { other?: LogOtherData }) {
 
 describe('request processing in the log details', () => {
   test('each plugin shows its stage, notice, changes, headers, effort, media and findings', () => {
-    renderDetails(false)
+    renderDetails(true, true)
 
     expect(screen.getByText('Request redaction')).toBeInTheDocument()
     expect(screen.getByText('Before the request is read')).toBeInTheDocument()
@@ -210,7 +213,7 @@ describe('request processing in the log details', () => {
   })
 
   test('a refusal reads as blocked with its code, and a cut record says how much is left out', () => {
-    renderDetails(false)
+    renderDetails(true, true)
 
     expect(screen.getByText('Request filter')).toBeInTheDocument()
     expect(screen.getByText('Final check')).toBeInTheDocument()
@@ -221,7 +224,7 @@ describe('request processing in the log details', () => {
   })
 
   test('a change or header the channel setting replaced stays listed, muted and marked', () => {
-    renderDetails(false)
+    renderDetails(true, true)
 
     const change = screen.getByText('top_p')
     expect(change).toHaveClass('text-muted-foreground')
@@ -286,7 +289,7 @@ test('a processed request is marked in the log list and the mark names its plugi
 })
 
 test('a plugin that could not read the request shows as not checked in the details', () => {
-  renderDetails(false)
+  renderDetails(true, true)
 
   expect(screen.getByText('Content moderation')).toBeInTheDocument()
   expect(screen.getByText('Not checked')).toBeInTheDocument()
@@ -341,8 +344,8 @@ test('reply checks show their stage, the parts they masked, a stop with its code
             },
           ],
         })}
-        isAdmin={false}
-        isRoot={false}
+        isAdmin
+        isRoot
         open
         onOpenChange={() => undefined}
       />
@@ -380,8 +383,8 @@ test('a Realtime session shows its unchecked audio input once and a transcript s
             },
           ],
         })}
-        isAdmin={false}
-        isRoot={false}
+        isAdmin
+        isRoot
         open
         onOpenChange={() => undefined}
       />
@@ -411,8 +414,8 @@ function renderAttachments(
             },
           ],
         })}
-        isAdmin={false}
-        isRoot={false}
+        isAdmin
+        isRoot
         open
         onOpenChange={() => undefined}
       />

@@ -27,7 +27,10 @@ export function ingress(ctx, req) {
   const input = req.body.input;
   if (input.includes("forbidden")) return {action: "reject", code: "blocked.ws", message: "Blocked"};
   if (!input.includes("secret")) return {action: "continue"};
-  return {action: "continue", effects: [{type: "json.patch", ops: [{op: "replace", path: "/input", value: input.replaceAll("secret", "[redacted]")}]}]};
+  return {action: "continue", effects: [{type: "json.patch", ops: [
+    {op: "replace", path: "/input", value: input.replaceAll("secret", "[redacted]")},
+    {op: "replace", path: "/reasoning/effort", value: "high"}
+  ]}]};
 }
 export function reply(ctx, res) {
   const result = {action: "continue", mask: []};
@@ -68,7 +71,7 @@ func TestResponsesWebSocketRunsRequestPlugins(t *testing.T) {
 			}
 			received <- string(create)
 			id := fmt.Sprintf("resp_%d", index)
-			if !send(`{"type":"response.created","response":{"id":"` + id + `","status":"in_progress"}}`) {
+			if !send(`{"type":"response.created","response":{"id":"` + id + `","model":"routed-secret-model","status":"in_progress"}}`) {
 				return
 			}
 			text := gjson.GetBytes(create, "input").Str
@@ -79,7 +82,7 @@ func TestResponsesWebSocketRunsRequestPlugins(t *testing.T) {
 						return
 					}
 				}
-				send(`{"type":"response.completed","response":{"id":"` + id + `","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"a bad word"}]}],` + usage + `}}`)
+				send(`{"type":"response.completed","response":{"id":"` + id + `","model":"routed-secret-model","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"a bad word"}]}],` + usage + `}}`)
 			case strings.Contains(text, "stop"):
 				if !send(`{"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"say stopword now"}`) {
 					return
@@ -97,7 +100,7 @@ func TestResponsesWebSocketRunsRequestPlugins(t *testing.T) {
 	})
 	client := fixture.client
 	create := func(input string) {
-		require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","input":"`+input+`"}`)))
+		require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","reasoning":{"effort":"low"},"input":"`+input+`"}`)))
 	}
 	upstream := func() string {
 		select {
@@ -119,8 +122,14 @@ func TestResponsesWebSocketRunsRequestPlugins(t *testing.T) {
 
 	// The ingress patch reaches the upstream and the reply is masked.
 	create("my secret plan")
-	assert.Equal(t, "my [redacted] plan", gjson.Get(upstream(), "input").Str)
-	assert.Equal(t, "response.created", readResponsesWSTestEvent(t, client)["type"])
+	sent := upstream()
+	assert.Equal(t, "my [redacted] plan", gjson.Get(sent, "input").Str)
+	assert.Equal(t, "high", gjson.Get(sent, "reasoning.effort").Str)
+	created := readResponsesWSTestEvent(t, client)
+	assert.Equal(t, "response.created", created["type"])
+	createdResponse, ok := created["response"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "ws-billing", createdResponse["model"])
 	var deltas []any
 	for range 2 {
 		event := readResponsesWSTestEvent(t, client)
@@ -132,6 +141,7 @@ func TestResponsesWebSocketRunsRequestPlugins(t *testing.T) {
 	assert.Equal(t, "response.completed", completed["type"])
 	encoded, err := common.Marshal(completed)
 	require.NoError(t, err)
+	assert.Equal(t, "ws-billing", gjson.GetBytes(encoded, "response.model").Str)
 	assert.Equal(t, "a *** word", gjson.GetBytes(encoded, "response.output.0.content.0.text").Str)
 
 	// A stop cancels the upstream response; the client gets the error. The
@@ -158,12 +168,15 @@ func TestResponsesWebSocketRunsRequestPlugins(t *testing.T) {
 	assertResponsesWSAccounting(t, fixture, []int{1000, 1000, 1000})
 	var logs []model.Log
 	require.NoError(t, model.LOG_DB.Where("type = ?", model.LogTypeConsume).Order("id").Find(&logs).Error)
+	require.Len(t, logs, 3)
+	assert.Equal(t, "low", gjson.Get(logs[0].Other, "requested_reasoning_effort").Str)
+	assert.Equal(t, "high", gjson.Get(logs[0].Other, "admin_info.effective_reasoning_effort").Str)
 	for index, want := range []string{
-		`[{"plugin":"rp-ws","stage":"ingress","changes":[{"op":"replace","path":"input","value":"my [redacted] plan"}]},{"plugin":"rp-ws","stage":"reply","masked":1,"findings":[{"category":"word","count":1}]}]`,
+		`[{"plugin":"rp-ws","stage":"ingress","changes":[{"op":"replace","path":"input","value":"my [redacted] plan"},{"op":"replace","path":"reasoning.effort","value":"high"}]},{"plugin":"rp-ws","stage":"reply","masked":1,"findings":[{"category":"word","count":1}]}]`,
 		`[{"plugin":"rp-ws","stage":"reply","rejected":{"code":"reply.blocked"}}]`,
 		``,
 	} {
-		record := gjson.Get(logs[index].Other, "request_plugins")
+		record := gjson.Get(logs[index].Other, "root_info.request_plugins")
 		if want == "" {
 			assert.False(t, record.Exists(), logs[index].Other)
 			continue
@@ -174,7 +187,8 @@ func TestResponsesWebSocketRunsRequestPlugins(t *testing.T) {
 	require.NoError(t, model.LOG_DB.Where("type = ?", model.LogTypeError).Find(&errorLogs).Error)
 	require.Len(t, errorLogs, 1)
 	assert.Contains(t, errorLogs[0].Content, "Blocked")
-	assert.JSONEq(t, `[{"plugin":"rp-ws","stage":"ingress","rejected":{"code":"blocked.ws"}}]`, stripRecordNames(t, gjson.Get(errorLogs[0].Other, "request_plugins").Raw))
+	assert.Equal(t, "low", gjson.Get(errorLogs[0].Other, "requested_reasoning_effort").Str)
+	assert.JSONEq(t, `[{"plugin":"rp-ws","stage":"ingress","rejected":{"code":"blocked.ws"}}]`, stripRecordNames(t, gjson.Get(errorLogs[0].Other, "root_info.request_plugins").Raw))
 }
 
 // stripRecordNames drops the display names, which come from the plugin meta.

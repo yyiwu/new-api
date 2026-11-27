@@ -34,6 +34,7 @@ import (
 	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"github.com/tidwall/gjson"
 )
 
 const responsesWSEventTypeResponseCreate = "response.create"
@@ -88,6 +89,7 @@ type responsesWSCallState struct {
 	controls chan responsesWSControl
 	done     chan struct{}
 	terminal *responsesWSMessage
+	receipt  *relaycommon.UsageReceipt
 	// A nonzero closeCode ends the connection after this request.
 	closeCode   int
 	closeReason string
@@ -209,9 +211,15 @@ func (s *responsesWSSession) runRequest(state *responsesWSCallState, message []b
 		s.clientWriteMu.Lock()
 		s.stateMu.Lock()
 		if outgoing != nil {
-			if err := s.client.SetWriteDeadline(s.clientWriteBudget.Deadline(time.Now(), len(outgoing.body))); err != nil {
+			body, err := relaycommon.RestoreResponseModel(outgoing.body, create.Request.Model)
+			if err == nil && gjson.GetBytes(body, "response").IsObject() {
+				body, err = relaycommon.ApplyUsageReceipt(body, "response.usage", state.receipt)
+			}
+			if err != nil {
 				state.closeCode = websocket.CloseInternalServerErr
-			} else if err := s.client.WriteMessage(outgoing.kind, outgoing.body); err != nil {
+			} else if err := s.client.SetWriteDeadline(s.clientWriteBudget.Deadline(time.Now(), len(body))); err != nil {
+				state.closeCode = websocket.CloseInternalServerErr
+			} else if err := s.client.WriteMessage(outgoing.kind, body); err != nil {
 				state.closeCode = websocket.CloseInternalServerErr
 			}
 		}
@@ -405,7 +413,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 	// the client gets it; without a reply or report instance the events go
 	// out untouched.
 	socket := requestplugin.ResponsesSocket(c, info, func(message []byte) {
-		if err := s.writeClient(websocket.TextMessage, message); err != nil {
+		if err := s.writeClient(websocket.TextMessage, message, modelName); err != nil {
 			s.shutdown(websocket.CloseInternalServerErr, "")
 		}
 	})
@@ -471,7 +479,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 				info.StreamStatus.RecordError("invalid upstream websocket event")
 			} else {
 				if event.Type != "error" && event.StreamID != "" && event.StreamID != create.StreamID {
-					if err := s.writeClient(incoming.kind, incoming.body); err != nil {
+					if err := s.writeClient(incoming.kind, incoming.body, modelName); err != nil {
 						s.shutdown(websocket.CloseInternalServerErr, "")
 					}
 					continue
@@ -496,7 +504,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 							}
 							continue
 						}
-						if err := s.writeClient(incoming.kind, incoming.body); err != nil {
+						if err := s.writeClient(incoming.kind, incoming.body, modelName); err != nil {
 							s.shutdown(websocket.CloseInternalServerErr, "")
 						}
 						// Only a control error in this stream resolves its pending control.
@@ -546,21 +554,21 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 				}
 				accumulator.Observe(&event.ResponsesStreamResponse, incoming.body)
 			}
-			switch event.Type {
-			case "response.completed", "response.done", "response.incomplete", "response.failed", "response.cancelled", "response.canceled":
+			if relaycommon.IsResponsesTerminalEvent(event.Type) {
 				if event.Response != nil {
 					s.lastResponseID = event.Response.ID
 				}
 				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonDone, nil)
 				state.terminal = terminalOf(incoming)
 				ConsumeResponsesQuota(c, info, accumulator.Finish())
+				state.receipt = info.UsageReceipt
 				return nil
 			}
 			if stopErr == nil {
 				if socket != nil && incoming.kind == websocket.TextMessage {
 					socket.Event(incoming.body)
 					stopErr = socket.Stopped()
-				} else if err := s.writeClient(incoming.kind, incoming.body); err != nil {
+				} else if err := s.writeClient(incoming.kind, incoming.body, modelName); err != nil {
 					s.shutdown(websocket.CloseInternalServerErr, "")
 				}
 			}
@@ -782,6 +790,7 @@ func buildResponsesWSCreatePayload(c *gin.Context, info *relaycommon.RelayInfo, 
 }
 
 func (s *responsesWSSession) startTargetReader(target *websocket.Conn) {
+	requestedModel := s.lockedModel
 	limit := int64(helper.DefaultMaxScannerBufferSize)
 	if appconstant.StreamScannerMaxBufferMB > 0 {
 		limit = int64(appconstant.StreamScannerMaxBufferMB) << 20
@@ -813,7 +822,7 @@ func (s *responsesWSSession) startTargetReader(target *websocket.Conn) {
 				s.shutdown(code, "upstream connection closed")
 				return
 			}
-			if writeErr := s.writeClient(kind, body); writeErr != nil {
+			if writeErr := s.writeClient(kind, body, requestedModel); writeErr != nil {
 				s.shutdown(websocket.CloseInternalServerErr, "")
 				return
 			}
@@ -868,7 +877,15 @@ func (s *responsesWSSession) writeTarget(kind int, message []byte) error {
 	return target.WriteMessage(kind, message)
 }
 
-func (s *responsesWSSession) writeClient(kind int, message []byte) error {
+func (s *responsesWSSession) writeClient(kind int, message []byte, requestedModel string) error {
+	message, err := relaycommon.RestoreResponseModel(message, requestedModel)
+	if err != nil {
+		return err
+	}
+	message, err = relaycommon.ApplyUsageReceipt(message, "response.usage", nil)
+	if err != nil {
+		return err
+	}
 	s.clientWriteMu.Lock()
 	defer s.clientWriteMu.Unlock()
 	if err := s.client.SetWriteDeadline(s.clientWriteBudget.Deadline(time.Now(), len(message))); err != nil {
@@ -883,7 +900,7 @@ func (s *responsesWSSession) sendError(eventID, streamID string, apiErr *types.N
 	}
 	payload, err := buildResponsesWSErrorPayload(eventID, streamID, apiErr)
 	if err == nil {
-		_ = s.writeClient(websocket.TextMessage, payload)
+		_ = s.writeClient(websocket.TextMessage, payload, "")
 	}
 }
 

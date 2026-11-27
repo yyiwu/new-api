@@ -459,6 +459,16 @@ func tasksToDto(tasks []*model.Task, fillUser bool, viewerRole int) []*dto.TaskD
 			}
 		}
 		item := relay.TaskModel2Dto(task)
+		if viewerRole < common.RoleRootUser {
+			properties := task.Properties
+			properties.UpstreamModelName = ""
+			item.Properties = properties
+			item.Data = nil
+			if task.Status == model.TaskStatusFailure && task.Properties.UpstreamModelName != "" {
+				item.FailReason = "Upstream request failed"
+				item.ResultURL = ""
+			}
+		}
 		item.LegacyVideoAvailable = legacyVideoAvailable(task)
 		item.ResultDiscarded = task.PrivateData.ResultDiscarded
 		if task.Status == model.TaskStatusSuccess {

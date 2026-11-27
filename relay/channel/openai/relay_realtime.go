@@ -41,6 +41,10 @@ func OpenaiRealtimeHandler(c *gin.Context, info *relaycommon.RelayInfo) (*types.
 	// from either reader, so each socket takes one writer at a time.
 	var clientWriteMu, targetWriteMu sync.Mutex
 	writeClient := func(message []byte) error {
+		message, err := relaycommon.RestoreResponseModel(message, info.OriginModelName)
+		if err != nil {
+			return err
+		}
 		clientWriteMu.Lock()
 		defer clientWriteMu.Unlock()
 		return helper.WssString(c, clientConn, string(message))

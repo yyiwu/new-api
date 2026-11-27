@@ -115,7 +115,7 @@ func assignDisplayLogIds(logs []*Log, startIdx int) {
 func formatUserLogs(logs []*Log, startIdx int) {
 	for i := range logs {
 		logs[i].ChannelName = ""
-		logs[i].Other = formatLogOtherJSON(logs[i].Other, logOtherVisibilityUser)
+		logs[i].formatForVisibility(logOtherVisibilityUser)
 	}
 	assignDisplayLogIds(logs, startIdx)
 }
@@ -124,7 +124,7 @@ func formatUserLogs(logs []*Log, startIdx int) {
 // admin_info. Root callers must not pass their results through this formatter.
 func FormatAdminLogs(logs []*Log) {
 	for i := range logs {
-		logs[i].Other = formatLogOtherJSON(logs[i].Other, logOtherVisibilityAdmin)
+		logs[i].formatForVisibility(logOtherVisibilityAdmin)
 	}
 }
 
@@ -132,7 +132,14 @@ func FormatAdminLogs(logs []*Log) {
 // without removing root-only diagnostics.
 func FormatRootLogs(logs []*Log) {
 	for i := range logs {
-		logs[i].Other = formatLogOtherJSON(logs[i].Other, logOtherVisibilityRoot)
+		logs[i].formatForVisibility(logOtherVisibilityRoot)
+	}
+}
+
+func (log *Log) formatForVisibility(visibility logOtherVisibility) {
+	log.Other = formatLogOtherJSON(log.Other, visibility, log.Type)
+	if visibility != logOtherVisibilityRoot && log.Type == LogTypeError && log.ChannelId != 0 {
+		log.Content = "Upstream request failed"
 	}
 }
 
@@ -337,12 +344,12 @@ type RecordConsumeLogParams struct {
 	Other            *LogOther         `json:"other"`
 }
 
-func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams) {
+func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams) string {
 	// Request plugin report hooks read what the request settled, whether or
 	// not consume logs are kept.
 	common.SetContextKey(c, constant.ContextKeyConsumeLog, &params)
 	if !common.LogConsumeEnabled {
-		return
+		return ""
 	}
 	logger.LogInfo(c, common.LogText("record consume log: userId=%d, params=%s", userId, common.GetJsonString(params)))
 	username := c.GetString("username")
@@ -412,6 +419,10 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 			NodeName:            common.NodeName,
 		})
 	}
+	if err != nil {
+		return ""
+	}
+	return log.RequestId
 }
 
 type RecordTaskBillingLogParams struct {
@@ -641,7 +652,7 @@ func StreamAllLogs(ctx context.Context, filter LogFilter, role int, fn func(*Log
 			}
 			log.ChannelName = name
 		}
-		log.Other = formatLogOtherJSON(log.Other, visibility)
+		log.formatForVisibility(visibility)
 		return fn(log)
 	})
 }
@@ -658,7 +669,7 @@ func StreamUserLogs(ctx context.Context, userId int, filter LogFilter, fn func(*
 		count++
 		log.Id = count
 		log.ChannelName = ""
-		log.Other = formatLogOtherJSON(log.Other, logOtherVisibilityUser)
+		log.formatForVisibility(logOtherVisibilityUser)
 		return fn(log)
 	})
 }

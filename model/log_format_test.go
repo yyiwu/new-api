@@ -87,13 +87,24 @@ func TestTaskPluginLogVisibilityIsRoleSeparated(t *testing.T) {
 
 func TestLegacyLogOtherVisibilityIsRoleSeparated(t *testing.T) {
 	other := common.MapToJsonStr(map[string]any{
-		"request_path":  "/v1/chat/completions",
-		"channel_id":    202,
-		"channel_name":  "legacy-secret-channel",
-		"channel_type":  1,
-		"reject_reason": "legacy-policy-rejection",
+		"request_path":                 "/v1/chat/completions",
+		"channel_id":                   202,
+		"channel_name":                 "legacy-secret-channel",
+		"channel_type":                 1,
+		"reject_reason":                "legacy-policy-rejection",
+		"is_model_mapped":              true,
+		"upstream_model_name":          "routed-secret-model",
+		"is_system_prompt_overwritten": true,
+		"po":                           []string{"set model = routed-secret-model"},
+		"reasoning_effort":             "historical-effective",
+		"request_plugins":              []any{map[string]any{"reasoning_effort": "high"}},
+		"stream_status":                map[string]any{"status": "error", "errors": []string{"routed-secret-model"}},
+		"response_model":               map[string]any{"requested_model": "requested-model", "upstream_model": "routed-secret-model", "returned_model": "returned-secret-model"},
 		"admin_info": map[string]any{
 			"existing_admin_field": "preserved",
+			"upstream_model_name":  "nested-secret-model",
+			"billing_model":        "billing-secret-model",
+			"po":                   []string{"set model = nested-secret-model"},
 		},
 		"root_info": map[string]any{
 			"upstream_request_id": "upstream-private",
@@ -124,12 +135,20 @@ func TestLegacyLogOtherVisibilityIsRoleSeparated(t *testing.T) {
 			"channel_name",
 			"channel_type",
 			"reject_reason",
+			"is_model_mapped",
+			"upstream_model_name",
+			"response_model",
+			"is_system_prompt_overwritten",
+			"po",
+			"reasoning_effort",
+			"request_plugins",
 			"admin_info",
 			"root_info",
 			"audit_info",
 		} {
 			assert.NotContains(t, parsed, key)
 		}
+		assert.NotContains(t, logs[0].Other, "routed-secret-model")
 	})
 
 	t.Run("admin", func(t *testing.T) {
@@ -142,6 +161,9 @@ func TestLegacyLogOtherVisibilityIsRoleSeparated(t *testing.T) {
 		assert.Equal(t, "legacy-secret-channel", parsed["channel_name"])
 		assert.NotContains(t, parsed, "reject_reason")
 		assert.NotContains(t, parsed, "root_info")
+		assert.NotContains(t, parsed, "reasoning_effort")
+		assert.NotContains(t, parsed, "request_plugins")
+		assert.NotContains(t, logs[0].Other, "secret-model")
 		assert.Contains(t, parsed, "audit_info")
 		adminInfo, ok := parsed["admin_info"].(map[string]any)
 		require.True(t, ok)
@@ -160,11 +182,42 @@ func TestLegacyLogOtherVisibilityIsRoleSeparated(t *testing.T) {
 		assert.NotContains(t, parsed, "reject_reason")
 		assert.Contains(t, parsed, "root_info")
 		assert.Contains(t, parsed, "audit_info")
+		assert.Contains(t, logs[0].Other, "routed-secret-model")
+		assert.Contains(t, logs[0].Other, "nested-secret-model")
 		adminInfo, ok := parsed["admin_info"].(map[string]any)
 		require.True(t, ok)
 		assert.Equal(t, "preserved", adminInfo["existing_admin_field"])
 		assert.Equal(t, "legacy-policy-rejection", adminInfo["reject_reason"])
 	})
+}
+
+func TestUsageLogShowsRequestedEffortWithoutReplacingAdminAudit(t *testing.T) {
+	const stored = `{"requested_reasoning_effort":"low","reasoning_effort":"high","admin_info":{"effective_reasoning_effort":"high"}}`
+	userLogs := []*Log{{ModelName: "requested", Other: stored}}
+	formatUserLogs(userLogs, 0)
+	assert.Equal(t, "requested", userLogs[0].ModelName)
+	assert.JSONEq(t, `{"requested_reasoning_effort":"low","reasoning_effort":"low"}`, userLogs[0].Other)
+
+	adminLogs := []*Log{{ModelName: "requested", Other: stored}}
+	FormatAdminLogs(adminLogs)
+	assert.Equal(t, "requested", adminLogs[0].ModelName)
+	assert.JSONEq(t, `{"requested_reasoning_effort":"low","reasoning_effort":"low","admin_info":{"effective_reasoning_effort":"high"}}`, adminLogs[0].Other)
+}
+
+func TestTaskRefundLogHidesUpstreamFailureDetails(t *testing.T) {
+	const stored = `{"task_id":"task_public","reason":"routed-secret-model rejected the request"}`
+	const redacted = `{"task_id":"task_public"}`
+	userLogs := []*Log{{Type: LogTypeRefund, Other: stored}}
+	formatUserLogs(userLogs, 0)
+	assert.JSONEq(t, redacted, userLogs[0].Other)
+
+	adminLogs := []*Log{{Type: LogTypeRefund, Other: stored}}
+	FormatAdminLogs(adminLogs)
+	assert.JSONEq(t, redacted, adminLogs[0].Other)
+
+	rootLogs := []*Log{{Type: LogTypeRefund, Other: stored}}
+	FormatRootLogs(rootLogs)
+	assert.JSONEq(t, stored, rootLogs[0].Other)
 }
 
 func TestLegacyRejectReasonDoesNotOverrideScopedValue(t *testing.T) {

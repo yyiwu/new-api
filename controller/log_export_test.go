@@ -56,7 +56,7 @@ func seedExportLogs(t *testing.T, mainDB *gorm.DB, logDB *gorm.DB, now int64) {
 	t.Helper()
 	require.NoError(t, mainDB.Create(&model.Channel{Id: 9, Name: "primary"}).Error)
 	logs := []model.Log{
-		{UserId: 1, Username: "alice", CreatedAt: now - 3600, Type: model.LogTypeConsume, ModelName: "gpt-a", ChannelId: 9, Quota: 10, RequestId: "a-1", Other: `{"admin_info":{"use_channel":["9"]}}`},
+		{UserId: 1, Username: "alice", CreatedAt: now - 3600, Type: model.LogTypeConsume, ModelName: "gpt-a", ChannelId: 9, Quota: 10, RequestId: "a-1", Other: `{"requested_reasoning_effort":"low","admin_info":{"use_channel":["9"],"effective_reasoning_effort":"high"},"root_info":{"upstream_model_name":"routed-secret-model","po":["set model = routed-secret-model"]}}`},
 		{UserId: 2, Username: "bob", CreatedAt: now - 1800, Type: model.LogTypeConsume, ModelName: "gpt-b", ChannelId: 9, Quota: 20, RequestId: "b-1"},
 		{UserId: 1, Username: "alice", CreatedAt: now - 60, Type: model.LogTypeError, ModelName: "gpt-a", RequestId: "a-2"},
 		{UserId: 1, Username: "alice", CreatedAt: now - 400*24*3600, Type: model.LogTypeConsume, ModelName: "gpt-a", RequestId: "a-old"},
@@ -86,6 +86,9 @@ func TestLogExportDatabaseMatrix(t *testing.T) {
 	previousMaster := common.IsMasterNode
 	common.IsMasterNode = true
 	t.Cleanup(func() { common.IsMasterNode = previousMaster })
+	previousLogs, previousExport := common.LogConsumeEnabled, common.DataExportEnabled
+	common.LogConsumeEnabled, common.DataExportEnabled = true, false
+	t.Cleanup(func() { common.LogConsumeEnabled, common.DataExportEnabled = previousLogs, previousExport })
 	for _, tc := range []struct {
 		kind, env string
 		typ       common.DatabaseType
@@ -105,6 +108,11 @@ func TestLogExportDatabaseMatrix(t *testing.T) {
 			if tc.kind == "clickhouse" {
 				mainDB, _ = newAuditTestDatabase(t, "sqlite", "")
 				mainType = common.DatabaseTypeSQLite
+			}
+			if mainType == common.DatabaseTypeSQLite {
+				sqlDB, err := mainDB.DB()
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
 			}
 			useLogExportDatabases(t, mainDB, db, mainType, tc.typ)
 			require.NoError(t, mainDB.AutoMigrate(&model.Channel{}))
@@ -139,13 +147,39 @@ func TestLogExportDatabaseMatrix(t *testing.T) {
 			assert.Equal(t, float64(1), own[0]["id"], "user exports carry list positions, not row ids")
 			assert.Empty(t, own[1]["channel_name"])
 			assert.NotContains(t, own[1]["other"], "admin_info")
+			assert.Equal(t, "gpt-a", own[1]["model_name"])
+			assert.Contains(t, own[1]["other"], `"reasoning_effort":"low"`)
+			assert.NotContains(t, own[1]["other"], "high")
+			assert.NotContains(t, own[1]["other"], "routed-secret-model")
 
 			all := callLogHandler(t, ExportAllLogs, 3, common.RoleAdminUser, query+"&model_name=gpt-%25")
 			require.Len(t, all, 4)
 			assert.Equal(t, []any{"a-2", "b-1", "a-1"}, exportedRequestIds(all))
 			assert.Equal(t, "primary", all[2]["channel_name"])
 			assert.Contains(t, all[2]["other"], "admin_info")
+			assert.Equal(t, "gpt-a", all[2]["model_name"])
+			assert.Contains(t, all[2]["other"], `"reasoning_effort":"low"`)
+			assert.Contains(t, all[2]["other"], `"effective_reasoning_effort":"high"`)
+			assert.NotContains(t, all[2]["other"], "routed-secret-model")
 			assert.Equal(t, true, all[3]["success"])
+
+			root := callLogHandler(t, ExportAllLogs, 4, common.RoleRootUser, query+"&request_id=a-1")
+			require.Len(t, root, 2)
+			assert.Contains(t, root[0]["other"], "routed-secret-model")
+
+			require.NoError(t, mainDB.AutoMigrate(&model.User{}))
+			require.NoError(t, mainDB.Create(&model.User{Id: 1, Username: "alice"}).Error)
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			ctx.Set("username", "alice")
+			logID := model.RecordConsumeLog(ctx, 1, model.RecordConsumeLogParams{ModelName: "gpt-a", Quota: 250, Other: model.NewLogOther()})
+			require.NotEmpty(t, logID)
+			receiptQuery := query + fmt.Sprintf("&request_id=%s&type=%d", logID, model.LogTypeConsume)
+			matching := callLogHandler(t, ExportUserLogs, 1, common.RoleCommonUser, receiptQuery)
+			require.Len(t, matching, 2)
+			assert.Equal(t, logID, matching[0]["request_id"])
+			assert.EqualValues(t, 250, matching[0]["quota"])
+			require.Len(t, callLogHandler(t, ExportUserLogs, 2, common.RoleCommonUser, receiptQuery), 1)
 		})
 	}
 }

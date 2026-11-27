@@ -2,7 +2,7 @@
   "openapi": "3.0.1",
   "info": {
     "title": "AI模型接口",
-    "description": "",
+    "description": "同步模型转发成功结算后，用量对象除原有 Token 字段外还包含 quota、cost_usd 和 log_id。流式请求仅在最终用量事件返回对账字段：Chat Completions 需启用 stream_options.include_usage，Responses 使用终止事件的 response.usage，Claude 使用 message_delta.usage，Gemini 使用 usageMetadata。未完成结算、二进制响应、Realtime 会话和独立任务协议不提供此回执。",
     "version": "1.0.0"
   },
   "tags": [
@@ -2340,6 +2340,21 @@
       "Usage": {
         "type": "object",
         "properties": {
+          "quota": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "本次结算扣除的 quota（不是剩余额度）"
+          },
+          "cost_usd": {
+            "type": "number",
+            "nullable": true,
+            "description": "按计费基准换算的美元金额（quota / QuotaPerUnit），不受界面币种设置影响；换算配置无效时为 null"
+          },
+          "log_id": {
+            "type": "string",
+            "nullable": true,
+            "description": "已写入消费日志的 request_id，不是列表序号。可在有权限的用量日志接口用 type=2 和 request_id 查询；关闭消费日志或写入失败时为 null"
+          },
           "prompt_tokens": {
             "type": "integer",
             "description": "提示词 Token 数"

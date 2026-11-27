@@ -463,8 +463,9 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 		model.UpdateChannelUsedQuota(relayInfo.ChannelId, summary.Quota)
 	}
 
-	if err := SettleBilling(ctx, relayInfo, summary.Quota); err != nil {
-		logger.LogError(ctx, common.LogText("error settling billing: %s", err.Error()))
+	settleErr := SettleBilling(ctx, relayInfo, summary.Quota)
+	if settleErr != nil {
+		logger.LogError(ctx, common.LogText("error settling billing: %s", settleErr.Error()))
 	}
 
 	logModel := summary.ModelName
@@ -542,7 +543,7 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 
 	attachQuotaSaturation(ctx, relayInfo, other)
 
-	model.RecordConsumeLog(ctx, relayInfo.UserId, model.RecordConsumeLogParams{
+	recordRelayConsumption(ctx, relayInfo, settleErr, model.RecordConsumeLogParams{
 		ChannelId:        relayInfo.ChannelId,
 		PromptTokens:     summary.PromptTokens,
 		CompletionTokens: summary.CompletionTokens,

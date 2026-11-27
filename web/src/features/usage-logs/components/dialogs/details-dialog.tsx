@@ -86,6 +86,7 @@ import {
   getFirstResponseTimeColor,
   getResponseTimeColor,
   getReasoningEffortVariant,
+  formatModelName,
   logTokenName,
   renderAuditContent,
   renderLogContent,
@@ -682,6 +683,22 @@ export function DetailsDialog(props: DetailsDialogProps) {
   const reasoningEffortVariant = getReasoningEffortVariant(
     other?.reasoning_effort
   )
+  const {
+    actualModel,
+    responseModel,
+    isMapped: isModelMapped,
+  } = formatModelName(props.log, props.isRoot)
+  const systemPromptOverwritten =
+    props.isAdmin &&
+    (adminInfo?.is_system_prompt_overwritten ||
+      other?.is_system_prompt_overwritten)
+  const rootInfo = props.isRoot ? other?.root_info : undefined
+  const paramOverrides = props.isRoot
+    ? (rootInfo?.po ?? adminInfo?.po ?? other?.po)
+    : undefined
+  const requestPlugins = props.isRoot
+    ? (rootInfo?.request_plugins ?? other?.request_plugins)
+    : undefined
 
   return (
     <Dialog
@@ -988,33 +1005,36 @@ export function DetailsDialog(props: DetailsDialogProps) {
           </DetailSection>
         ) : null}
 
-        {props.isRoot && other?.root_info ? (
+        {rootInfo &&
+        (rootInfo.task_plugin ||
+          rootInfo.upstream_task_id ||
+          rootInfo.node_name) ? (
           <DetailSection label={t('Root Diagnostics')}>
-            {other.root_info.task_plugin ? (
+            {rootInfo.task_plugin ? (
               <>
                 <DetailRow
                   label={t('API Version')}
-                  value={String(other.root_info.task_plugin.api_version)}
+                  value={String(rootInfo.task_plugin.api_version)}
                   mono
                 />
                 <DetailRow
                   label={t('Plugin Generation')}
-                  value={String(other.root_info.task_plugin.generation)}
+                  value={String(rootInfo.task_plugin.generation)}
                   mono
                 />
               </>
             ) : null}
-            {other.root_info.upstream_task_id ? (
+            {rootInfo.upstream_task_id ? (
               <DetailRow
                 label={t('Upstream Task ID')}
-                value={other.root_info.upstream_task_id}
+                value={rootInfo.upstream_task_id}
                 mono
               />
             ) : null}
-            {other.root_info.node_name ? (
+            {rootInfo.node_name ? (
               <DetailRow
                 label={t('Node Name')}
-                value={other.root_info.node_name}
+                value={rootInfo.node_name}
                 mono
               />
             ) : null}
@@ -1188,9 +1208,17 @@ export function DetailsDialog(props: DetailsDialogProps) {
             }
           />
         )}
+        {props.isAdmin &&
+          adminInfo?.effective_reasoning_effort !== undefined && (
+            <DetailRow
+              label={t('Effective Reasoning Effort')}
+              value={adminInfo.effective_reasoning_effort || '—'}
+              mono
+            />
+          )}
 
         {/* System prompt override */}
-        {other?.is_system_prompt_overwritten && (
+        {systemPromptOverwritten && (
           <DetailRow
             label={t('System Prompt')}
             value={
@@ -1204,28 +1232,22 @@ export function DetailsDialog(props: DetailsDialogProps) {
           />
         )}
 
-        {other?.response_model && (
+        {responseModel && (
           <DetailSection label={t('Response Model')}>
-            <ResponseModelDetails observation={other.response_model} />
+            <ResponseModelDetails observation={responseModel} />
           </DetailSection>
         )}
         {/* Model mapping for logs without response observations */}
-        {!other?.response_model &&
-          other?.is_model_mapped &&
-          other?.upstream_model_name && (
-            <DetailSection label={t('Model Mapping')}>
-              <DetailRow
-                label={t('Request Model')}
-                value={props.log.model_name}
-                mono
-              />
-              <DetailRow
-                label={t('Actual Model')}
-                value={other.upstream_model_name}
-                mono
-              />
-            </DetailSection>
-          )}
+        {!responseModel && isModelMapped && actualModel && (
+          <DetailSection label={t('Model Mapping')}>
+            <DetailRow
+              label={t('Request Model')}
+              value={props.log.model_name}
+              mono
+            />
+            <DetailRow label={t('Actual Model')} value={actualModel} mono />
+          </DetailSection>
+        )}
 
         {/* Token breakdown (for consume/error types with token data) */}
         {isDisplayableType(props.log.type) && other && (
@@ -1376,27 +1398,27 @@ export function DetailsDialog(props: DetailsDialogProps) {
           </DetailSection>
         )}
 
-        {other?.request_plugins?.length ? (
+        {requestPlugins?.length ? (
           <DetailSection
             icon={<Workflow className='size-3.5' aria-hidden='true' />}
             iconTone='chart-3'
             label={t('Request processing')}
           >
             <RequestPluginRecord
-              items={other.request_plugins}
+              items={requestPlugins}
               loadIcons={props.isRoot}
             />
           </DetailSection>
         ) : null}
 
         {/* Param override */}
-        {other?.po && Array.isArray(other.po) && other.po.length > 0 && (
+        {Array.isArray(paramOverrides) && paramOverrides.length > 0 && (
           <DetailSection
             icon={<Settings2 className='size-3.5' aria-hidden='true' />}
             iconTone='chart-3'
-            label={`${t('Param Override')} (${other.po.length})`}
+            label={`${t('Param Override')} (${paramOverrides.length})`}
           >
-            {other.po.filter(Boolean).map((line) => {
+            {paramOverrides.filter(Boolean).map((line) => {
               const parsed = parseAuditLine(line)
               if (!parsed) return null
               return (

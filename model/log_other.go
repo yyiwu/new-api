@@ -10,10 +10,11 @@ import (
 )
 
 const (
-	logOtherAdminInfoKey    = "admin_info"
-	logOtherRootInfoKey     = "root_info"
-	logOtherAuditInfoKey    = "audit_info"
-	logOtherContentPartsKey = "content_parts"
+	logOtherAdminInfoKey                = "admin_info"
+	logOtherRootInfoKey                 = "root_info"
+	logOtherAuditInfoKey                = "audit_info"
+	logOtherContentPartsKey             = "content_parts"
+	LogOtherRequestedReasoningEffortKey = "requested_reasoning_effort"
 )
 
 // legacySensitiveLogOtherKeys are historical top-level fields that must never
@@ -22,7 +23,17 @@ var legacySensitiveLogOtherKeys = []string{
 	"channel_id",
 	"channel_name",
 	"channel_type",
+	"is_system_prompt_overwritten",
 	"reject_reason",
+	"effective_reasoning_effort",
+}
+
+var rootOnlyLogOtherKeys = []string{
+	"billing_model",
+	"is_model_mapped",
+	"upstream_model_name",
+	"response_model",
+	"po",
 }
 
 type logOtherVisibility int
@@ -49,16 +60,16 @@ func NewLogOther() *LogOther {
 
 func isReservedLogOtherKey(key string) bool {
 	switch key {
-	case logOtherAdminInfoKey, logOtherRootInfoKey, logOtherAuditInfoKey:
+	case logOtherAdminInfoKey, logOtherRootInfoKey, logOtherAuditInfoKey, "request_plugins", "reasoning_effort":
 		return true
 	default:
-		return slices.Contains(legacySensitiveLogOtherKeys, key)
+		return slices.Contains(legacySensitiveLogOtherKeys, key) || slices.Contains(rootOnlyLogOtherKeys, key)
 	}
 }
 
 // SetPublic records metadata that log owners may receive from self/token log APIs.
 // It rejects role-scoped and legacy-sensitive keys so new writers cannot recreate
-// the historical channel/reject-reason leak.
+// historical privileged-field leaks.
 func (o *LogOther) SetPublic(key string, value any) bool {
 	if o == nil || key == "" || isReservedLogOtherKey(key) {
 		return false
@@ -94,6 +105,9 @@ func (o *LogOther) setContent(parts []*common.Message) string {
 func (o *LogOther) SetAdmin(key string, value any) bool {
 	if o == nil || key == "" {
 		return false
+	}
+	if slices.Contains(rootOnlyLogOtherKeys, key) {
+		return o.SetRoot(key, value)
 	}
 	if o.adminInfo == nil {
 		o.adminInfo = make(map[string]any)
@@ -226,10 +240,40 @@ func normalizeLegacyRejectReason(values map[string]json.RawMessage) bool {
 	return true
 }
 
+func stripLogOtherKeys(values map[string]json.RawMessage, keys ...string) bool {
+	before := len(values)
+	for _, key := range keys {
+		delete(values, key)
+	}
+	return len(values) != before
+}
+
+func stripNestedLogOtherKeys(values map[string]json.RawMessage, field string, keys ...string) bool {
+	raw, exists := values[field]
+	if !exists {
+		return false
+	}
+	var nested map[string]json.RawMessage
+	if err := common.Unmarshal(raw, &nested); err != nil {
+		delete(values, field)
+		return true
+	}
+	if !stripLogOtherKeys(nested, keys...) {
+		return false
+	}
+	encoded, err := common.Marshal(nested)
+	if err != nil {
+		delete(values, field)
+	} else {
+		values[field] = encoded
+	}
+	return true
+}
+
 // formatLogOtherJSON applies the role projection while keeping untouched JSON
 // values as RawMessage. This preserves integers larger than JavaScript's safe
 // range instead of round-tripping them through float64.
-func formatLogOtherJSON(value string, visibility logOtherVisibility) string {
+func formatLogOtherJSON(value string, visibility logOtherVisibility, logType int) string {
 	if value == "" {
 		return ""
 	}
@@ -243,26 +287,27 @@ func formatLogOtherJSON(value string, visibility logOtherVisibility) string {
 	}
 
 	changed := false
-	if visibility == logOtherVisibilityUser {
-		for _, key := range []string{logOtherAdminInfoKey, logOtherRootInfoKey, logOtherAuditInfoKey} {
-			if _, exists := values[key]; exists {
-				delete(values, key)
-				changed = true
-			}
-		}
-		for _, key := range legacySensitiveLogOtherKeys {
-			if _, exists := values[key]; exists {
-				delete(values, key)
-				changed = true
-			}
-		}
+	if requestedEffort, exists := values[LogOtherRequestedReasoningEffortKey]; exists {
+		values["reasoning_effort"] = requestedEffort
+		changed = true
 	} else {
-		changed = normalizeLegacyRejectReason(values)
+		changed = stripLogOtherKeys(values, "reasoning_effort")
+	}
+	if visibility != logOtherVisibilityRoot {
+		changed = stripLogOtherKeys(values, rootOnlyLogOtherKeys...) || changed
+		changed = stripLogOtherKeys(values, "request_plugins", logOtherRootInfoKey) || changed
+		changed = stripNestedLogOtherKeys(values, "stream_status", "end_error", "errors") || changed
+		if logType == LogTypeRefund {
+			changed = stripLogOtherKeys(values, "reason") || changed
+		}
+	}
+	if visibility == logOtherVisibilityUser {
+		changed = stripLogOtherKeys(values, logOtherAdminInfoKey, logOtherAuditInfoKey) || changed
+		changed = stripLogOtherKeys(values, legacySensitiveLogOtherKeys...) || changed
+	} else {
+		changed = normalizeLegacyRejectReason(values) || changed
 		if visibility == logOtherVisibilityAdmin {
-			if _, exists := values[logOtherRootInfoKey]; exists {
-				delete(values, logOtherRootInfoKey)
-				changed = true
-			}
+			changed = stripNestedLogOtherKeys(values, logOtherAdminInfoKey, rootOnlyLogOtherKeys...) || changed
 		}
 	}
 

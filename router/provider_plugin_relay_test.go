@@ -229,7 +229,7 @@ func registerRelayPlugin(t *testing.T, source string) *jsplugin.LoadedPlugin {
 	return plugin
 }
 
-var volatileReplyFields = regexp.MustCompile(`"(id|created|created_at|response_id|item_id)":("[^"]*"|\d+)`)
+var volatileReplyFields = regexp.MustCompile(`"(id|created|created_at|response_id|item_id|log_id)":("[^"]*"|\d+)`)
 
 func normalizedReply(text string) string {
 	return volatileReplyFields.ReplaceAllString(text, `"$1":0`)
@@ -1232,11 +1232,20 @@ func TestPluginStreamErrors(t *testing.T) {
 	chunk := func(delta string) string {
 		return `data: {"id":"chatcmpl-v","object":"chat.completion.chunk","created":1730000000,"model":"gpt-4o-mini","choices":[{"index":0,"delta":` + delta + "}]}\n\n"
 	}
-	output := chunk(`{"role":"assistant","content":"one"},"finish_reason":null`) +
-		chunk(`{"role":"assistant","content":"two"},"finish_reason":null`) +
-		chunk(`{},"finish_reason":"stop"`) +
-		`data: {"id":"chatcmpl-v","object":"chat.completion.chunk","created":1730000000,"model":"gpt-4o-mini","choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":2000,"total_tokens":3000}}` + "\n\n" +
-		"data: [DONE]\n\n"
+	output := func(t *testing.T, outcome relayOutcome) string {
+		t.Helper()
+		require.NotEmpty(t, outcome.log.RequestId)
+		usage, err := common.Marshal(map[string]any{
+			"prompt_tokens": 1000, "completion_tokens": 2000, "total_tokens": 3000,
+			"quota": outcome.quota, "cost_usd": float64(outcome.quota) / common.QuotaPerUnit, "log_id": outcome.log.RequestId,
+		})
+		require.NoError(t, err)
+		return chunk(`{"role":"assistant","content":"one"},"finish_reason":null`) +
+			chunk(`{"role":"assistant","content":"two"},"finish_reason":null`) +
+			chunk(`{},"finish_reason":"stop"`) +
+			`data: {"id":"chatcmpl-v","object":"chat.completion.chunk","created":1730000000,"model":"gpt-4o-mini","choices":[],"usage":` + string(usage) + "}\n\n" +
+			"data: [DONE]\n\n"
+	}
 	// slowVendor sends the dropped event count times every interval, then
 	// "one" and "two".
 	slowVendor := func(count int, interval time.Duration) func(w http.ResponseWriter, attempt int, request capturedRequest) {
@@ -1259,7 +1268,7 @@ func TestPluginStreamErrors(t *testing.T) {
 		outcome := harness.post(t, "/v1/chat/completions", streamBody)
 
 		require.Equal(t, http.StatusOK, outcome.status, outcome.body)
-		assert.Equal(t, output, outcome.body)
+		assert.Equal(t, output(t, outcome), outcome.body)
 		assert.EqualValues(t, 2000, outcome.log.CompletionTokens)
 		assert.Positive(t, outcome.quota)
 	})
@@ -1272,7 +1281,7 @@ func TestPluginStreamErrors(t *testing.T) {
 		outcome := harness.post(t, "/v1/chat/completions", streamBody)
 
 		require.Equal(t, http.StatusOK, outcome.status, outcome.body)
-		assert.Equal(t, output, outcome.body)
+		assert.Equal(t, output(t, outcome), outcome.body)
 		assert.Positive(t, outcome.quota)
 	})
 
@@ -1294,7 +1303,7 @@ func TestPluginStreamErrors(t *testing.T) {
 		outcome := harness.post(t, "/v1/chat/completions", streamBody)
 
 		require.Equal(t, http.StatusOK, outcome.status, outcome.body)
-		assert.Equal(t, output, outcome.body)
+		assert.Equal(t, output(t, outcome), outcome.body)
 		assert.EqualValues(t, 2000, outcome.log.CompletionTokens)
 	})
 
@@ -1313,7 +1322,7 @@ func TestPluginStreamErrors(t *testing.T) {
 		require.True(t, found, outcome.body)
 		assert.GreaterOrEqual(t, strings.Count(pings, ": PING\n\n"), 2, outcome.body)
 		assert.Equal(t, strings.Repeat(": PING\n\n", strings.Count(pings, ": PING\n\n")), pings, "only pings come before the first event")
-		assert.Equal(t, output, strings.ReplaceAll("data: "+rest, ": PING\n\n", ""))
+		assert.Equal(t, output(t, outcome), strings.ReplaceAll("data: "+rest, ": PING\n\n", ""))
 		assert.EqualValues(t, 2000, outcome.log.CompletionTokens)
 		assert.Positive(t, outcome.quota)
 		assert.Equal(t, outcome.log.Quota, outcome.quota)
@@ -1340,7 +1349,7 @@ func TestPluginStreamErrors(t *testing.T) {
 		assert.NotContains(t, pluginError.body, `"content":"two"`)
 		assert.NotContains(t, pluginError.body, "busy")
 		assert.Equal(t, readError.status, pluginError.status)
-		assert.Equal(t, readError.body, pluginError.body)
+		assert.Equal(t, normalizedReply(readError.body), normalizedReply(pluginError.body))
 		assert.Equal(t, readError.quota, pluginError.quota)
 		assert.Equal(t, readError.log.CompletionTokens, pluginError.log.CompletionTokens)
 	})
@@ -1835,7 +1844,7 @@ func TestPluginConverterMultipartRequests(t *testing.T) {
 				tc.sent(t, requests[0])
 			}
 			if tc.reply == "" {
-				assert.JSONEq(t, want[tc.format].body, got.body)
+				assert.JSONEq(t, normalizedReply(want[tc.format].body), normalizedReply(got.body))
 				assert.Equal(t, "application/json", got.header.Get("Content-Type"))
 			} else {
 				assert.Equal(t, tc.reply, got.body)
@@ -2020,12 +2029,12 @@ export function outbound(ctx, req) {
 	assert.Equal(t, int64(1), first.Get("effects").Int())
 	assert.JSONEq(t, `[{"rule":"email","count":1}]`, first.Get("findings").Raw)
 	assert.NotContains(t, outcome.log.Other, "example.com")
-	// Users see what changed; instance ids and rule ids stay in admin_info.
+	assert.False(t, gjson.Get(outcome.log.Other, "request_plugins").Exists())
 	assert.JSONEq(t, `[
 		{"plugin":"rp-relay","name":{"en":"Redact"},"stage":"ingress","changes":[{"op":"replace","path":"messages[0].content","value":"mail [email] now"}],"findings":[{"count":1}]},
 		{"plugin":"rp-relay","name":{"en":"Redact"},"stage":"ingress","changes":[{"op":"add","path":"user","value":"late:openai"}]},
 		{"plugin":"rp-relay","name":{"en":"Redact"},"stage":"outbound","changes":[{"op":"add","path":"store","value":false}],"headers":{"set":["x-vendor-flag"]}}
-	]`, gjson.Get(outcome.log.Other, "request_plugins").Raw)
+	]`, gjson.Get(outcome.log.Other, "root_info.request_plugins").Raw)
 
 	// An outbound rejection answers 400, sends nothing and shows on the
 	// error log.
@@ -2044,7 +2053,7 @@ export function outbound(ctx, req) {
 	var errorLog model.Log
 	require.NoError(t, model.LOG_DB.Where("type = ?", model.LogTypeError).Order("id DESC").First(&errorLog).Error)
 	assert.JSONEq(t, `{"plugin":"rp-relay","name":{"en":"Redact"},"stage":"outbound","rejected":{"code":"blocked.upstream"}}`,
-		gjson.Get(errorLog.Other, `request_plugins.#(rejected.code=="blocked.upstream")`).Raw)
+		gjson.Get(errorLog.Other, `root_info.request_plugins.#(rejected.code=="blocked.upstream")`).Raw)
 	assert.Equal(t, "reject", gjson.Get(errorLog.Other, `admin_info.request_plugins.#(instance=="block")#.action|@reverse|0`).Str)
 	assert.NotContains(t, errorLog.Other, "Not for this channel")
 
@@ -2061,7 +2070,7 @@ export function outbound(ctx, req) {
 	assert.Equal(t, relayTestModel, errorLog.ModelName)
 	assert.Contains(t, errorLog.Content, "Not at the door (code: blocked.door)")
 	assert.JSONEq(t, `[{"plugin":"rp-relay","name":{"en":"Redact"},"stage":"ingress","rejected":{"code":"blocked.door"}}]`,
-		gjson.Get(errorLog.Other, "request_plugins").Raw)
+		gjson.Get(errorLog.Other, "root_info.request_plugins").Raw)
 	assert.Equal(t, "reject", gjson.Get(errorLog.Other, `admin_info.request_plugins.0.action`).Str)
 	assert.Equal(t, "door", gjson.Get(errorLog.Other, `admin_info.request_plugins.0.instance`).Str)
 }
@@ -2107,7 +2116,7 @@ export function egress(ctx, req) {
 			"changes":[{"op":"add","path":"temperature","value":0.7,"overridden":true},{"op":"add","path":"top_p","value":0.9}],
 			"headers":{"set":["x-bar","x-foo"],"overridden":["x-foo"]},"notice":{"en":"openai messages true"}},
 		{"plugin":"rp-order","name":{"en":"Order"},"stage":"egress","findings":[{"category":"check","count":1}],"notice":{"en":"openai temperature 0.2"}}
-	]`, gjson.Get(outcome.log.Other, "request_plugins").Raw)
+	]`, gjson.Get(outcome.log.Other, "root_info.request_plugins").Raw)
 
 	// A chat request the channel sends as a Responses request takes the
 	// outbound hooks and the param override in chat form; egress reads the
@@ -2130,7 +2139,7 @@ export function egress(ctx, req) {
 	assert.Contains(t, requests[0].URL, "/v1/responses")
 	assert.True(t, gjson.Get(requests[0].Body, "input").Exists(), requests[0].Body)
 	assert.Equal(t, 0.2, gjson.Get(requests[0].Body, "temperature").Float())
-	record := gjson.Get(outcome.log.Other, "request_plugins")
+	record := gjson.Get(outcome.log.Other, "root_info.request_plugins")
 	assert.Equal(t, "openai messages true", record.Get(`#(stage=="outbound").notice.en`).Str)
 	assert.True(t, record.Get(`#(stage=="outbound").changes.#(path=="temperature").overridden`).Bool())
 	assert.Equal(t, "openai_responses temperature 0.2", record.Get(`#(stage=="egress").notice.en`).Str)
@@ -2185,7 +2194,7 @@ export function reply(ctx, res) {
 	assert.Equal(t, strconv.Itoa(len(plain.body)), plain.header.Get("Content-Length"))
 	assert.Positive(t, plain.quota)
 	assert.JSONEq(t, `[{"plugin":"rp-reply-relay","name":{"en":"Reply"},"stage":"reply","masked":1,"findings":[{"category":"email","count":1}]}]`,
-		gjson.Get(plain.log.Other, "request_plugins").Raw)
+		gjson.Get(plain.log.Other, "root_info.request_plugins").Raw)
 	assert.Equal(t, "continue", gjson.Get(plain.log.Other, `admin_info.request_plugins.#(stage=="reply").action`).Str)
 	assert.NotContains(t, plain.log.Other, "example.com")
 
@@ -2193,7 +2202,7 @@ export function reply(ctx, res) {
 	setInstances(`["another-model"]`)
 	untouched := harness.post(t, "/v1/chat/completions", relayTestBody)
 	assert.Equal(t, "mail a.b@example.com now", gjson.Get(untouched.body, "choices.0.message.content").Str)
-	assert.False(t, gjson.Get(untouched.log.Other, "request_plugins").Exists())
+	assert.False(t, gjson.Get(untouched.log.Other, "root_info.request_plugins").Exists())
 	assert.Equal(t, plain.quota, untouched.quota)
 	setInstances(`["` + relayTestModel + `"]`)
 
@@ -2206,7 +2215,7 @@ export function reply(ctx, res) {
 	assert.NotContains(t, streamed.body, "example.com")
 	assert.Contains(t, streamed.body, "data: [DONE]")
 	assert.Positive(t, streamed.quota)
-	assert.Equal(t, int64(1), gjson.Get(streamed.log.Other, `request_plugins.#(stage=="reply").masked`).Int())
+	assert.Equal(t, int64(1), gjson.Get(streamed.log.Other, `root_info.request_plugins.#(stage=="reply").masked`).Int())
 
 	// A stop in a stream: an error event, the end of the stream, the
 	// upstream request canceled, and the text received so far billed. The
@@ -2239,7 +2248,7 @@ export function reply(ctx, res) {
 	assert.NotContains(t, stopped.body, "forbidden")
 	assert.Eventually(t, canceled.Load, time.Second, 10*time.Millisecond, "the upstream request was canceled")
 	assert.Positive(t, stopped.quota)
-	assert.Equal(t, "reply.blocked", gjson.Get(stopped.log.Other, `request_plugins.#(stage=="reply").rejected.code`).Str)
+	assert.Equal(t, "reply.blocked", gjson.Get(stopped.log.Other, `root_info.request_plugins.#(stage=="reply").rejected.code`).Str)
 	assert.Equal(t, "stop", gjson.Get(stopped.log.Other, `admin_info.request_plugins.#(stage=="reply").action`).Str)
 
 	// A stop of a non-stream answer: 400, billed as the answer would be.
@@ -2249,7 +2258,7 @@ export function reply(ctx, res) {
 	assert.Equal(t, "response_rejected", gjson.Get(rejected.body, "error.code").Str)
 	assert.NotContains(t, rejected.body, "forbidden answer")
 	assert.Equal(t, plain.quota, rejected.quota)
-	assert.Equal(t, "reply.blocked", gjson.Get(rejected.log.Other, `request_plugins.#(stage=="reply").rejected.code`).Str)
+	assert.Equal(t, "reply.blocked", gjson.Get(rejected.log.Other, `root_info.request_plugins.#(stage=="reply").rejected.code`).Str)
 }
 
 // A Midjourney submission runs the request plugins' ingress: a rejection
@@ -2287,7 +2296,7 @@ export function ingress(ctx, req) {
 	require.NoError(t, model.LOG_DB.Where("type = ?", model.LogTypeError).Order("id DESC").First(&errorLog).Error)
 	assert.Equal(t, "mj_imagine", errorLog.ModelName)
 	assert.JSONEq(t, `[{"plugin":"rp-mj","name":{"en":"Redact"},"stage":"ingress","rejected":{"code":"blocked.mj"}}]`,
-		gjson.Get(errorLog.Other, "request_plugins").Raw)
+		gjson.Get(errorLog.Other, "root_info.request_plugins").Raw)
 
 	setInstances(`[{"id":"redact","name":"Redact","plugin":"rp-mj","enabled":true,"global":true}]`)
 	outcome = harness.post(t, "/mj/submit/imagine", `{"prompt":"mail a@b.co a cat"}`)
@@ -2298,7 +2307,7 @@ export function ingress(ctx, req) {
 	assert.Equal(t, "mail [email] a cat", gjson.Get(requests[0].Body, "prompt").Str)
 	assert.Positive(t, outcome.quota)
 	assert.JSONEq(t, `[{"plugin":"rp-mj","name":{"en":"Redact"},"stage":"ingress","changes":[{"op":"replace","path":"prompt","value":"mail [email] a cat"}]}]`,
-		gjson.Get(outcome.log.Other, "request_plugins").Raw)
+		gjson.Get(outcome.log.Other, "root_info.request_plugins").Raw)
 	var task model.Midjourney
 	require.NoError(t, model.DB.Order("id DESC").First(&task).Error)
 	assert.Equal(t, "mail [email] a cat", task.Prompt)

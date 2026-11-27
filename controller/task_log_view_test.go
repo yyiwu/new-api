@@ -14,6 +14,12 @@ func TestTaskLogDTOSeparatesUserAdminAndRootDetails(t *testing.T) {
 	task := &model.Task{
 		TaskID:   "task_public",
 		Platform: "document-parser",
+		Data:     []byte(`{"model":"routed-secret-model"}`),
+		Properties: model.Properties{
+			Input:             "public input",
+			OriginModelName:   "requested-model",
+			UpstreamModelName: "routed-secret-model",
+		},
 		PrivateData: model.TaskPrivateData{
 			Key:            "channel-secret-canary",
 			UpstreamTaskID: "upstream-private",
@@ -39,8 +45,18 @@ func TestTaskLogDTOSeparatesUserAdminAndRootDetails(t *testing.T) {
 	userView := tasksToDto([]*model.Task{task}, false, common.RoleCommonUser)[0]
 	assert.Nil(t, userView.AdminInfo)
 	assert.Nil(t, userView.RootInfo)
+	userProperties, ok := userView.Properties.(model.Properties)
+	require.True(t, ok)
+	assert.Equal(t, "requested-model", userProperties.OriginModelName)
+	assert.Empty(t, userProperties.UpstreamModelName)
+	assert.Empty(t, userView.Data)
 
 	adminView := tasksToDto([]*model.Task{task}, false, common.RoleAdminUser)[0]
+	adminProperties, ok := adminView.Properties.(model.Properties)
+	require.True(t, ok)
+	assert.Equal(t, "requested-model", adminProperties.OriginModelName)
+	assert.Empty(t, adminProperties.UpstreamModelName)
+	assert.Empty(t, adminView.Data)
 	require.NotNil(t, adminView.AdminInfo)
 	require.NotNil(t, adminView.AdminInfo.TaskPlugin)
 	assert.Equal(t, "document-parser", adminView.AdminInfo.TaskPlugin.Key)
@@ -71,6 +87,8 @@ func TestTaskLogDTOSeparatesUserAdminAndRootDetails(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(rootJSON), "channel-secret-canary")
 	assert.Contains(t, string(rootJSON), "upstream-private")
+	assert.Contains(t, string(rootJSON), `"upstream_model_name":"routed-secret-model"`)
+	assert.JSONEq(t, `{"model":"routed-secret-model"}`, string(rootView.Data))
 }
 
 func TestTaskLogDTODoesNotInventHistoricalPluginProvenance(t *testing.T) {
@@ -116,6 +134,18 @@ func TestTaskLogDTOKeepsFailureReasonAndDoesNotMarkPluginTaskLegacy(t *testing.T
 	failedView := tasksToDto([]*model.Task{failed}, false, common.RoleCommonUser)[0]
 	assert.Equal(t, "provider rejected the request", failedView.FailReason)
 	assert.False(t, failedView.LegacyVideoAvailable)
+
+	failed.Properties.UpstreamModelName = "routed-secret-model"
+	failed.FailReason = "provider rejected routed-secret-model"
+	for _, role := range []int{common.RoleCommonUser, common.RoleAdminUser} {
+		view := tasksToDto([]*model.Task{failed}, false, role)[0]
+		assert.Equal(t, "Upstream request failed", view.FailReason)
+		encoded, err := common.Marshal(view)
+		require.NoError(t, err)
+		assert.NotContains(t, string(encoded), "routed-secret-model")
+	}
+	rootView := tasksToDto([]*model.Task{failed}, false, common.RoleRootUser)[0]
+	assert.Equal(t, failed.FailReason, rootView.FailReason)
 
 	pluginTask := &model.Task{
 		TaskID:     "task_plugin_video",

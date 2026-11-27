@@ -7,6 +7,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/gin-gonic/gin"
@@ -106,4 +107,11 @@ func SettleBilling(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, actualQuo
 		return PostConsumeQuota(relayInfo, quotaDelta, relayInfo.FinalPreConsumedQuota, true)
 	}
 	return nil
+}
+
+func recordRelayConsumption(ctx *gin.Context, info *relaycommon.RelayInfo, settleErr error, params model.RecordConsumeLogParams) {
+	logID := model.RecordConsumeLog(ctx, info.UserId, params)
+	if settleErr == nil {
+		info.UsageReceipt = relaycommon.NewUsageReceipt(params.Quota, logID)
+	}
 }

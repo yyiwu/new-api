@@ -63,6 +63,7 @@ import {
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { RelatedPolicyLink } from '@/features/system-settings/request-policies/related-policy-link'
+import { useIsAdmin } from '@/hooks/use-admin'
 import { useStatus } from '@/hooks/use-status'
 import { getUserModels, getUserGroups } from '@/lib/api'
 import { getCurrencyDisplay, getCurrencyLabel } from '@/lib/currency'
@@ -107,6 +108,7 @@ export function ApiKeysMutateDrawer({
   currentRow,
 }: ApiKeyMutateDrawerProps) {
   const { t } = useTranslation()
+  const isAdmin = useIsAdmin()
   const isUpdate = !!currentRow
   const currentRowId = currentRow?.id
   const { triggerRefresh } = useApiKeys()
@@ -202,7 +204,7 @@ export function ApiKeysMutateDrawer({
 
   const form = useForm<ApiKeyFormValues>({
     resolver: zodResolver(schema),
-    defaultValues: getApiKeyFormDefaultValues(defaultUseAutoGroup),
+    defaultValues: getApiKeyFormDefaultValues(isAdmin && defaultUseAutoGroup),
   })
 
   // Load existing data when updating
@@ -229,18 +231,25 @@ export function ApiKeysMutateDrawer({
     if (initializedTarget === target) return
     if (isUpdate && currentRow) {
       if (apiKeyData?.success && apiKeyData.data) {
-        form.reset(
-          transformApiKeyToFormDefaults(
-            apiKeyData.data,
-            availableAutoGroupNames,
-            maxAutoGroups
-          )
+        const defaults = transformApiKeyToFormDefaults(
+          apiKeyData.data,
+          availableAutoGroupNames,
+          maxAutoGroups
         )
+        if (!isAdmin) {
+          defaults.group = ''
+          defaults.auto_groups_mode = 'inherit'
+          defaults.auto_groups = []
+          defaults.cross_group_retry = false
+        }
+        form.reset(defaults)
         setInitializedTarget(target)
       }
     } else {
       form.reset(
-        getApiKeyFormDefaultValues(defaultUseAutoGroup && backendHasAuto)
+        getApiKeyFormDefaultValues(
+          isAdmin && defaultUseAutoGroup && backendHasAuto
+        )
       )
       setInitializedTarget(target)
     }
@@ -262,6 +271,7 @@ export function ApiKeysMutateDrawer({
     availableAutoGroupNames,
     maxAutoGroups,
     initializedTarget,
+    isAdmin,
   ])
 
   const formTarget =
@@ -291,6 +301,11 @@ export function ApiKeysMutateDrawer({
     setIsSubmitting(true)
     try {
       const basePayload = transformFormDataToPayload(data)
+      if (!isAdmin) {
+        basePayload.group = ''
+        basePayload.auto_groups = []
+        basePayload.cross_group_retry = false
+      }
 
       if (isUpdate && currentRow) {
         const result = await updateApiKey({
@@ -418,7 +433,7 @@ export function ApiKeysMutateDrawer({
                 control={form.control}
                 name='group'
                 render={({ field }) => (
-                  <FormItem>
+                  <FormItem hidden={!isAdmin}>
                     <FormLabel>{t('Group')}</FormLabel>
                     <FormControl>
                       <ApiKeyGroupCombobox
@@ -444,7 +459,7 @@ export function ApiKeysMutateDrawer({
                 )}
               />
 
-              {selectedGroup === 'auto' && (
+              {isAdmin && selectedGroup === 'auto' && (
                 <FormField
                   control={form.control}
                   name='auto_groups'
@@ -485,7 +500,7 @@ export function ApiKeysMutateDrawer({
                 />
               )}
 
-              {selectedGroup === 'auto' && (
+              {isAdmin && selectedGroup === 'auto' && (
                 <FormField
                   control={form.control}
                   name='cross_group_retry'

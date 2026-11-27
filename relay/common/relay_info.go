@@ -117,7 +117,11 @@ type RelayInfo struct {
 	RealtimeTools      []dto.RealTimeTool
 	IsFirstRequest     bool
 	AudioUsage         bool
-	ReasoningEffort    string
+	// RequestedReasoningEffort is the pre-plugin value for logs. ReasoningEffort
+	// is mutable, and each attempt starts from the value after ingress.
+	RequestedReasoningEffort string
+	ReasoningEffort          string
+	initialReasoningEffort   string
 	// ReasoningConversion is the suffix-derived reasoning intent attached
 	// after model mapping. Converters read it via ReasoningState().
 	ReasoningConversion *dto.ReasoningConversionState
@@ -177,7 +181,8 @@ type RelayInfo struct {
 	// RequestPluginRecord, which every attempt keeps.
 	requestPluginIngressRecord int
 
-	PriceData hosttypes.PriceData
+	PriceData    hosttypes.PriceData
+	UsageReceipt *UsageReceipt
 
 	// QuotaClamp is set (non-nil) when a quota conversion saturated at the
 	// supported single-request bound (or NaN fallback) while computing this request's charge.
@@ -364,7 +369,7 @@ func (info *RelayInfo) InitChannelMeta(c *gin.Context) {
 		info.ReasoningEffort = ""
 		info.ReasoningConversion = nil
 	} else {
-		info.ReasoningEffort = reasoningEffortFromRequest(info.Request)
+		info.ReasoningEffort = info.initialReasoningEffort
 		info.ReasoningConversion = nil
 	}
 
@@ -633,10 +638,16 @@ func genBaseRelayInfo(c *gin.Context, request dto.Request) *RelayInfo {
 		reqId = common.NewRequestId()
 	}
 	reasoningEffort := reasoningEffortFromRequest(request)
+	requestedEffort, captured := common.GetContextKeyType[string](c, constant.ContextKeyRequestedReasoningEffort)
+	if !captured {
+		requestedEffort = reasoningEffort
+	}
 	originModelName := common.GetContextKeyString(c, constant.ContextKeyOriginalModel)
 	info := &RelayInfo{
-		Request:         request,
-		ReasoningEffort: reasoningEffort,
+		Request:                  request,
+		RequestedReasoningEffort: requestedEffort,
+		ReasoningEffort:          reasoningEffort,
+		initialReasoningEffort:   reasoningEffort,
 
 		RequestId:  reqId,
 		UserId:     common.GetContextKeyInt(c, constant.ContextKeyUserId),

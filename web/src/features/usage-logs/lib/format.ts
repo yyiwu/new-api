@@ -240,24 +240,37 @@ export function getResponseTimeColor(
 /**
  * Format model name with mapping indicator
  */
-export function formatModelName(log: UsageLog): {
+export function formatModelName(
+  log: UsageLog,
+  isRoot = false
+): {
   name: string
   isMapped: boolean
   actualModel?: string
   responseModel?: LogOtherData['response_model']
 } {
-  const other = parseLogOther(log.other)
+  const other = isRoot ? parseLogOther(log.other) : undefined
+  const rootInfo = other?.root_info
+  const adminInfo = other?.admin_info
+  const actualModel =
+    rootInfo?.upstream_model_name ??
+    adminInfo?.upstream_model_name ??
+    other?.upstream_model_name
   const isMapped = !!(
-    other?.is_model_mapped &&
-    other?.upstream_model_name &&
-    other.upstream_model_name !== ''
+    actualModel &&
+    (rootInfo?.is_model_mapped ??
+      adminInfo?.is_model_mapped ??
+      other?.is_model_mapped)
   )
 
   return {
     name: log.model_name,
     isMapped,
-    actualModel: isMapped ? other.upstream_model_name : undefined,
-    responseModel: other?.response_model,
+    actualModel: isMapped ? actualModel : undefined,
+    responseModel:
+      rootInfo?.response_model ??
+      adminInfo?.response_model ??
+      other?.response_model,
   }
 }
 

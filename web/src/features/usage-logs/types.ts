@@ -209,6 +209,12 @@ export interface LogOtherData {
     local_count_tokens?: boolean
     usage_billing_path?: UsageBillingPath | string
     channel_affinity?: ChannelAffinityInfo
+    is_model_mapped?: boolean
+    upstream_model_name?: string
+    response_model?: LogOtherData['response_model']
+    is_system_prompt_overwritten?: boolean
+    effective_reasoning_effort?: string
+    po?: string[]
     // Top-up audit fields (type=1, admin only)
     payment_method?: string
     callback_payment_method?: string
@@ -238,6 +244,11 @@ export interface LogOtherData {
     task_plugin?: TaskPluginRuntimeInfo
     upstream_task_id?: string
     node_name?: string
+    is_model_mapped?: boolean
+    upstream_model_name?: string
+    response_model?: LogOtherData['response_model']
+    po?: string[]
+    request_plugins?: RequestPluginRecordItem[]
   }
   // Structured log content: English source keys plus params, rendered in the
   // viewer's language. `content` keeps the English text for older clients.

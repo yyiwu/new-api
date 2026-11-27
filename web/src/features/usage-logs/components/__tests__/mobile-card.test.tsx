@@ -24,7 +24,10 @@ import {
 } from '@tanstack/react-table'
 import { render, screen, within, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { expect, it, vi } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
+
+import { ROLE } from '@/lib/roles'
+import { useAuthStore } from '@/stores/auth-store'
 
 import { usageLogSchema, type UsageLog } from '../../data/schema'
 import { useCommonLogsColumns } from '../columns/common-logs-columns'
@@ -57,11 +60,12 @@ const log = usageLogSchema.parse({
 
 function Fixture(props: {
   admin?: boolean
+  root?: boolean
   visibility?: VisibilityState
   logs?: UsageLog[]
   loading?: boolean
 }) {
-  const columns = useCommonLogsColumns(props.admin ?? true, false)
+  const columns = useCommonLogsColumns(props.admin ?? true, props.root ?? false)
   const context = useUsageLogsContext()
   const table = useReactTable({
     data: props.logs ?? [log],
@@ -84,6 +88,14 @@ function Fixture(props: {
 }
 
 function renderLogs(props: Parameters<typeof Fixture>[0] = {}) {
+  let role: number = ROLE.ADMIN
+  if (props.root) role = ROLE.SUPER_ADMIN
+  else if (props.admin === false) role = ROLE.USER
+  useAuthStore.getState().auth.setUser({
+    id: 1,
+    username: 'test-user',
+    role,
+  })
   return render(
     <QueryClientProvider
       client={
@@ -97,9 +109,47 @@ function renderLogs(props: Parameters<typeof Fixture>[0] = {}) {
   )
 }
 
+afterEach(() => useAuthStore.getState().auth.reset('idle'))
+
+it.each([false, true])(
+  'hides routing metadata from non-root users on mobile (admin: %s)',
+  async (admin) => {
+    const user = userEvent.setup()
+    const copy = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue()
+    const routing = {
+      is_model_mapped: true,
+      upstream_model_name: 'mapped-secret-model',
+      response_model: {
+        requested_model: longName,
+        upstream_model: 'mapped-secret-model',
+        returned_model: 'returned-secret-model',
+      },
+    }
+    renderLogs({
+      admin,
+      logs: [
+        {
+          ...log,
+          other: JSON.stringify(admin ? { admin_info: routing } : routing),
+        },
+      ],
+    })
+
+    await user.click(screen.getByRole('button', { name: `Model: ${longName}` }))
+
+    expect(copy).toHaveBeenCalledWith(longName)
+    expect(
+      screen.queryByRole('dialog', { name: 'Model' })
+    ).not.toBeInTheDocument()
+    expect(screen.queryByText('mapped-secret-model')).not.toBeInTheDocument()
+    expect(screen.queryByText('returned-secret-model')).not.toBeInTheDocument()
+  }
+)
+
 it('shows model mismatch evidence when tapping the mobile model badge', async () => {
   const user = userEvent.setup()
   renderLogs({
+    root: true,
     logs: [
       {
         ...log,
@@ -306,6 +356,7 @@ it('labels a task whose result was returned in the response as synchronous', () 
 it('shows mapped model names in full when inspecting a mobile model badge', async () => {
   const user = userEvent.setup()
   renderLogs({
+    root: true,
     logs: [
       {
         ...log,

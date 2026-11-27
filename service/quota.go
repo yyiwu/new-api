@@ -376,8 +376,9 @@ func PostAudioConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, u
 		model.UpdateChannelUsedQuota(relayInfo.ChannelId, quota)
 	}
 
-	if err := SettleBilling(ctx, relayInfo, quota); err != nil {
-		logger.LogError(ctx, common.LogText("error settling billing: %s", err.Error()))
+	settleErr := SettleBilling(ctx, relayInfo, quota)
+	if settleErr != nil {
+		logger.LogError(ctx, common.LogText("error settling billing: %s", settleErr.Error()))
 	}
 
 	logModel := billingModelName
@@ -388,7 +389,7 @@ func PostAudioConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, u
 		InjectTieredBillingInfo(other, relayInfo, tieredResult)
 	}
 	attachQuotaSaturation(ctx, relayInfo, other)
-	model.RecordConsumeLog(ctx, relayInfo.UserId, model.RecordConsumeLogParams{
+	recordRelayConsumption(ctx, relayInfo, settleErr, model.RecordConsumeLogParams{
 		ChannelId:        relayInfo.ChannelId,
 		PromptTokens:     usage.PromptTokens,
 		CompletionTokens: usage.CompletionTokens,
